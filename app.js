@@ -290,9 +290,47 @@ document.addEventListener('keydown', e => { if ($('#viewer').classList.contains(
 
 /* ---------- アップロード(4枚同時) ---------- */
 let jobs = [], running = false;
+let staged = [], stageSkipped = 0, thumbIO = null;
+const monthKey = ms => { const d = new Date(ms || Date.now()); return d.getFullYear() * 100 + d.getMonth() + 1; };
+const monthLabel = k => Math.floor(k / 100) + '年' + (k % 100) + '月';
+function stage(fs) {   // 選んだ写真から、保存済みを自動で外して、確認画面に並べる
+  const known = new Set(items.map(i => i.m.n + '|' + i.m.s)), have = new Set(staged.map(x => x.fp));
+  for (const f of fs) { const fp = f.name + '|' + f.size; if (known.has(fp) || have.has(fp)) { stageSkipped++; continue; } have.add(fp); staged.push({ f, fp, ck: true, mo: monthKey(f.lastModified) }); }
+  if (tab !== 'up') go('up'); else renderUp();
+}
+function loadThumb(img, f) {
+  if (!f.type.startsWith('image/')) { img.replaceWith(Object.assign(document.createElement('span'), { className: 'ph0', textContent: '🎬' })); return; }
+  createImageBitmap(f, { resizeWidth: 200, resizeQuality: 'low' }).then(bm => { const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0); c.toBlob(b => { if (b) img.src = blobUrl(b, 'image/jpeg'); }, 'image/jpeg', .6); }).catch(() => { img.replaceWith(Object.assign(document.createElement('span'), { className: 'ph0', textContent: '🖼' })); });
+}
 function renderUp() {
-  $('#main').innerHTML = '<div class="up"><div class="drop">写真や動画を選んでください<br>まとめて何枚でも選べます<br>同じ写真は自動で飛ばします<br><button class="btn" id="pick">選ぶ</button></div><div id="jobs"></div></div>';
-  $('#pick').onclick = () => $('#file').click(); drawJobs();
+  const main = $('#main');
+  const pickBox = '<div class="drop' + (staged.length ? ' small' : '') + '">' + (staged.length ? '' : '写真や動画を選んでください<br>まとめて何枚でも選べます<br>保存済みの写真は自動で外れます<br>') + '<button class="btn" id="pick">' + (staged.length ? '追加で選ぶ' : '選ぶ') + '</button></div>';
+  if (!staged.length) {
+    main.innerHTML = '<div class="up">' + (stageSkipped ? '<div class="note">保存済みの ' + stageSkipped + '件は外しました</div>' : '') + pickBox + '<div id="jobs"></div></div>';
+    $('#pick').onclick = () => $('#file').click(); drawJobs(); return;
+  }
+  const by = {}; for (const x of staged) (by[x.mo] = by[x.mo] || []).push(x);
+  const months = Object.keys(by).map(Number).sort((p, q) => q - p);
+  let h = '<div class="up rv">' + pickBox + '<div class="note">' + (stageSkipped ? '保存済みの ' + stageSkipped + '件は外しました。' : '') + '外したい写真は、タップしてチェックを外してください</div>';
+  for (const mo of months) {
+    const L = by[mo], on = L.filter(x => x.ck).length;
+    h += '<div class="mh"><span>' + monthLabel(mo) + '  <small>' + on + '/' + L.length + '件</small></span><button class="ib" data-mo="' + mo + '">' + (on === L.length ? 'この月を全部外す' : 'この月を全部チェック') + '</button></div><div class="grid">';
+    for (const x of L) h += '<div class="cell' + (x.ck ? ' on' : '') + '" data-i="' + staged.indexOf(x) + '"><img alt=""><span class="chk">' + (x.ck ? '✓' : '') + '</span></div>';
+    h += '</div>';
+  }
+  h += '<div id="jobs"></div><div style="height:90px"></div></div>';
+  main.innerHTML = h;
+  const n = staged.filter(x => x.ck).length;
+  main.insertAdjacentHTML('beforeend', '<div id="goBar"><button class="btn" id="goUp"' + (n ? '' : ' disabled') + '>' + n + '件をアップロード</button><button class="btn ghost" id="goNo">やめる</button></div>');
+  $('#pick').onclick = () => $('#file').click();
+  $('#goNo').onclick = () => { staged = []; stageSkipped = 0; $('#goBar') && $('#goBar').remove(); renderUp(); };
+  $('#goUp').onclick = () => { for (const x of staged) if (x.ck) jobs.push({ f: x.f, st: 'wait', p: 0 }); staged = []; stageSkipped = 0; renderUp(); runJobs(); };
+  main.querySelectorAll('[data-mo]').forEach(bt => bt.onclick = () => { const L = by[bt.dataset.mo], all = L.every(x => x.ck); L.forEach(x => x.ck = !all); const y = main.scrollTop; renderUp(); $('#main').scrollTop = y; });
+  main.querySelectorAll('.cell').forEach(c => { c.onclick = () => { const x = staged[c.dataset.i]; x.ck = !x.ck; renderUp.keep = main.scrollTop; const y = main.scrollTop; renderUp(); $('#main').scrollTop = y; }; });
+  if (thumbIO) thumbIO.disconnect();
+  thumbIO = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { thumbIO.unobserve(e.target); const x = staged[e.target.parentNode.dataset.i]; if (x) loadThumb(e.target, x.f); } }), { root: main, rootMargin: '300px' });
+  main.querySelectorAll('.cell img').forEach(i => thumbIO.observe(i));
+  drawJobs();
 }
 function drawJobs() {
   const j = $('#jobs'); if (!j) return;
@@ -300,7 +338,7 @@ function drawJobs() {
   j.innerHTML = jobs.map(x => '<div class="job"><span class="n">' + esc(x.f.name) + '</span><span class="s ' + x.st + '">' + lab[x.st] + (x.err ? ' (' + esc(x.err) + ')' : '') + '</span></div>' + (x.st === 'run' ? '<div class="bar"><i style="width:' + Math.round(x.p) + '%"></i></div>' : '')).join('');
   if (jobs.length) { const ok = jobs.filter(x => x.st === 'ok').length, dup = jobs.filter(x => x.st === 'dup').length, left = jobs.filter(x => x.st === 'wait' || x.st === 'run').length; j.insertAdjacentHTML('afterbegin', '<div style="padding:4px 0 10px;font-size:13px;color:var(--sub)">' + jobs.length + '件中  完了 ' + ok + ' / 重複 ' + dup + (left ? ' / 残り ' + left : '') + '</div>'); }
 }
-$('#file').onchange = e => { for (const f of e.target.files) jobs.push({ f, st: 'wait', p: 0 }); e.target.value = ''; if (tab !== 'up') go('up'); else drawJobs(); runJobs(); };
+$('#file').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; stage(fs); };
 function putBlob(path, u8, onp) {
   const r = ref(st, path);
   if (u8.length < 16 * 1048576) return uploadBytes(r, u8).then(() => onp(1));
