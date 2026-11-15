@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#4b2a8f">
+<title>かけがえ</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<style>
+:root{--bg:#120c24;--bg2:#1c1338;--card:#261a4a;--ink:#f3eeff;--sub:#a99bd0;--acc:#b58cff;--acc2:#ff8fc7;--line:#3a2b6b;--danger:#ff6b8b}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+#app{height:100%;display:flex;flex-direction:column}
+.hide{display:none!important}
+/* lock */
+#lock{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;background:linear-gradient(160deg,#4b2a8f,#1a1033 70%)}
+#lock img{width:96px;height:96px;border-radius:24px;box-shadow:0 10px 30px #0008}
+#lock h1{margin:0;font-size:26px;letter-spacing:.1em}
+#lock p{margin:0;color:var(--sub);font-size:14px;text-align:center;line-height:1.7}
+#lock input{width:min(320px,100%);padding:14px;border-radius:14px;border:1px solid var(--line);background:#0006;color:var(--ink);font-size:17px;text-align:center}
+.btn{padding:13px 26px;border-radius:14px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#1a0d33;font-weight:700}
+.btn.ghost{background:var(--card);color:var(--ink)}
+.btn.danger{background:var(--danger);color:#fff}
+#lockMsg{min-height:20px;color:var(--acc2);font-size:13px}
+/* header */
+header{display:flex;align-items:center;gap:10px;padding:calc(10px + env(safe-area-inset-top)) 14px 10px;background:var(--bg2);border-bottom:1px solid var(--line)}
+header h2{margin:0;font-size:18px;flex:1}
+header .ib{padding:8px 12px;border-radius:12px;background:var(--card);font-size:14px}
+main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+nav{display:flex;background:var(--bg2);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;padding:10px 0 9px;font-size:11px;color:var(--sub);display:flex;flex-direction:column;align-items:center;gap:3px}
+nav button b{font-size:21px;font-weight:400}
+nav button.on{color:var(--acc)}
+/* grid */
+.day{padding:12px 14px 6px;font-size:13px;color:var(--sub);position:sticky;top:0;background:var(--bg);z-index:2}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:0 2px}
+@media(min-width:700px){.grid{grid-template-columns:repeat(6,1fr)}}
+.cell{position:relative;aspect-ratio:1;background:var(--card);overflow:hidden}
+.cell img{width:100%;height:100%;object-fit:cover;display:block}
+.cell .fav{position:absolute;right:5px;bottom:3px;font-size:14px;text-shadow:0 1px 3px #000}
+.cell .dur{position:absolute;left:5px;bottom:4px;font-size:11px;background:#000a;padding:1px 6px;border-radius:8px}
+.cell .chk{position:absolute;left:5px;top:5px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:#0005;display:none;align-items:center;justify-content:center;font-size:13px}
+.sel .cell .chk{display:flex}
+.cell.picked .chk{background:var(--acc);border-color:var(--acc);color:#1a0d33}
+.cell.picked img{opacity:.55}
+.empty{padding:60px 24px;text-align:center;color:var(--sub);line-height:1.9}
+/* albums */
+.albs{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:14px}
+.alb{background:var(--card);border-radius:16px;overflow:hidden}
+.alb .cv{aspect-ratio:1.3;background:#0004;display:flex;align-items:center;justify-content:center;font-size:34px;color:var(--sub)}
+.alb .cv img{width:100%;height:100%;object-fit:cover}
+.alb .nm{padding:9px 12px;font-size:14px}.alb .nm small{display:block;color:var(--sub);font-size:11px;margin-top:2px}
+/* bars */
+#selbar{position:fixed;left:0;right:0;bottom:0;z-index:20;display:flex;gap:6px;justify-content:space-around;padding:10px 8px calc(10px + env(safe-area-inset-bottom));background:var(--bg2);border-top:1px solid var(--line)}
+#selbar button{flex:1;padding:10px 4px;border-radius:12px;background:var(--card);font-size:13px}
+/* upload */
+.up{padding:18px 14px}
+.drop{border:2px dashed var(--line);border-radius:18px;padding:34px 16px;text-align:center;color:var(--sub);line-height:1.9}
+.drop .btn{margin-top:10px;display:inline-block}
+.job{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.job .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job .s{color:var(--sub);white-space:nowrap}
+.job .s.ok{color:#8fe3b0}.job .s.dup{color:#ffd37a}.job .s.err{color:var(--danger)}
+.bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--acc)}
+/* viewer */
+#viewer{position:fixed;inset:0;z-index:40;background:#000;display:flex;flex-direction:column}
+#viewer .top,#viewer .bot{display:flex;align-items:center;gap:6px;padding:calc(8px + env(safe-area-inset-top)) 10px 8px;color:#fff;z-index:2}
+#viewer .bot{padding:8px 10px calc(10px + env(safe-area-inset-bottom));justify-content:space-around}
+#viewer .top .t{flex:1;font-size:13px;text-align:center;color:#ccc}
+#viewer .bot button,#viewer .top button{padding:10px 14px;font-size:15px;border-radius:12px;background:#ffffff1c}
+#vst{flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:pan-y}
+#vst img,#vst video{max-width:100%;max-height:100%}
+#vst .ld{color:var(--sub)}
+.arr{position:absolute;top:50%;transform:translateY(-50%);font-size:30px;padding:14px 10px;color:#fff9}
+.arr.l{left:0}.arr.r{right:0}
+/* dialog */
+#dlg{position:fixed;inset:0;z-index:60;background:#000a;display:flex;align-items:flex-end;justify-content:center}
+#dlg .box{width:min(480px,100%);background:var(--bg2);border-radius:20px 20px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom));max-height:80%;overflow:auto}
+#dlg h3{margin:0 0 12px;font-size:16px}
+#dlg .row{display:flex;gap:8px;margin-top:14px}.row .btn{flex:1;text-align:center}
+#dlg input{width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:#0006;color:var(--ink);font-size:16px}
+#dlg .opt{padding:13px 10px;border-bottom:1px solid var(--line);font-size:15px;width:100%;text-align:left}
+#toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);z-index:70;background:#000c;padding:10px 18px;border-radius:20px;font-size:13px;opacity:0;transition:.25s;pointer-events:none}
+#toast.on{opacity:1}
+</style></head>
+<body>
+<div id="lock">
+  <img src="icon.svg" alt="">
+  <h1>かけがえ</h1>
+  <p id="lockSub">あいことばを いれてね</p>
+  <input id="pw" type="password" autocomplete="off" placeholder="あいことば">
+  <input id="pw2" class="hide" type="password" autocomplete="off" placeholder="もういちど">
+  <div id="lockMsg"></div>
+  <button class="btn" id="lockGo">ひらく</button>
+</div>
+
+<div id="app" class="hide">
+  <header><h2 id="ttl">しゃしん</h2><button class="ib" id="selBtn">えらぶ</button><button class="ib" id="lockBtn">🔒</button></header>
+  <main id="main"></main>
+  <nav>
+    <button data-t="all"><b>🖼</b>しゃしん</button>
+    <button data-t="fav"><b>♡</b>おきにいり</button>
+    <button data-t="alb"><b>📁</b>アルバム</button>
+    <button data-t="up"><b>⬆︎</b>アップ</button>
+  </nav>
+</div>
+<div id="selbar" class="hide">
+  <button id="sbAlb">📁 アルバムへ</button><button id="sbFav">♡ おきにいり</button><button id="sbDl">⬇︎ ほぞん</button><button id="sbDel">🗑 けす</button>
+</div>
+<div id="viewer" class="hide">
+  <div class="top"><button id="vClose">✕</button><div class="t" id="vTitle"></div><button id="vInfo">⋯</button></div>
+  <div id="vst"></div>
+  <div class="bot"><button id="vFav">♡</button><button id="vAlb">📁</button><button id="vDl">⬇︎</button><button id="vDel">🗑</button></div>
+</div>
+<div id="dlg" class="hide"><div class="box" id="dbox"></div></div>
+<div id="toast"></div>
+<input type="file" id="file" accept="image/*,video/*" multiple class="hide">
+
+<script type="module" src="app.js"></script>
+</body></html>
