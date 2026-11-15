@@ -4,6 +4,7 @@
    - 速さ: 一覧は端末に(暗号化したまま)覚えておき、2回目からは新しい分だけ取る。アップは4枚同時 */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, query, where, Timestamp, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { ZipWriter } from "./zip.js?v=10";
 import { getStorage, ref, uploadBytes, uploadBytesResumable, getBytes, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const app = initializeApp({
@@ -12,7 +13,7 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
-const APP_VER = '9';
+const APP_VER = '10';
 const dbgLog = [];
 function dbg(m) { const d = new Date(); dbgLog.push(String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + ' ' + m); while (dbgLog.length > 8) dbgLog.shift(); const b = document.querySelector('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
@@ -210,8 +211,8 @@ $('#setBtn').onclick = () => {
   const n = items.length, vids = items.filter(i => i.m.t === 'v').length, size = items.reduce((s, i) => s + (i.m.s || 0), 0);
   const yen = size / 1073741824 * 3.5;
   const b = dlg('<h3>保存容量 <small style="color:var(--sub);font-weight:400">(版 v' + APP_VER + ')</small></h3><div class="stat"><div class="big">' + fmtSize(size) + '</div><div>写真 ' + (n - vids) + '枚 / 動画 ' + vids + '本(計 ' + n + '件)</div><div class="mut">料金の目安: 月 約' + (yen < 1 ? '1円未満' : Math.round(yen) + '円') + '(1GBあたり約3.5円で計算)<br>※正確な使用量は Firebase コンソールの Storage で確認できます</div></div><h3 style="margin-top:18px">ロック</h3>' +
-    '<button class="opt" id="fidBtn">' + (fid ? '✓ 顔認証で開く: オン(押すとオフ)' : '顔認証(Face ID)で開けるようにする') + '</button><button class="opt" id="lkBtn">今すぐロックする</button><div class="row"><button class="btn ghost" id="dNo">閉じる</button></div>');
-  b.querySelector('#dNo').onclick = closeDlg; b.querySelector('#lkBtn').onclick = relock;
+    '<button class="opt" id="fidBtn">' + (fid ? '✓ 顔認証で開く: オン(押すとオフ)' : '顔認証(Face ID)で開けるようにする') + '</button><button class="opt" id="zipBtn">💾 全部まとめて ZIP で保存(パソコン用)</button><button class="opt" id="lkBtn">今すぐロックする</button><div class="row"><button class="btn ghost" id="dNo">閉じる</button></div>');
+  b.querySelector('#dNo').onclick = closeDlg; b.querySelector('#lkBtn').onclick = relock; b.querySelector('#zipBtn').onclick = () => { closeDlg(); backupZip(); };
   b.querySelector('#fidBtn').onclick = async () => { closeDlg(); if (fid) { await kvDel('face'); fid = null; toast('顔認証をオフにしました'); } else await enrollFace(); };
 };
 
@@ -468,3 +469,59 @@ lockInit().catch(e => { $('#lockMsg').textContent = '接続できませんでし
 
 window.addEventListener('error', e => { try { toast('エラー: ' + (e.message || '')); } catch (x) { } });
 window.addEventListener('unhandledrejection', e => { try { toast('エラー: ' + ((e.reason && e.reason.message) || e.reason || '')); } catch (x) { } });
+
+/* ---------- 全部まとめて ZIP(USB などに残す用。暗号を解いた原本。月ごとのフォルダ) ---------- */
+let zipBusy = false;
+async function backupZip() {
+  if (zipBusy) return toast('作成中です');
+  const list = [...items].sort((p, q) => p.m.d - q.m.d);
+  if (!list.length) return toast('保存する写真がありません');
+  const total = list.reduce((s, i) => s + (i.m.s || 0), 0), d0 = new Date(), p2 = n => String(n).padStart(2, '0');
+  const fname = 'かけがえ_' + d0.getFullYear() + p2(d0.getMonth() + 1) + p2(d0.getDate()) + '.zip';
+  // 保存先は、ボタンを押した直後に選ぶ(パソコンの Chrome / Edge は、書きながらディスクに保存するので大きくても大丈夫)
+  let sink, w = null, parts = [];
+  if (window.showSaveFilePicker) {
+    try { const h = await showSaveFilePicker({ suggestedName: fname, types: [{ description: 'ZIP ファイル', accept: { 'application/zip': ['.zip'] } }] }); w = await h.createWritable(); sink = { write: u8 => w.write(u8) }; }
+    catch (e) { return toast('保存をやめました'); }
+  } else {
+    if (!await confirmDlg('この端末では、保存の途中経過をメモリにためます。\n全部で ' + fmtSize(total) + ' あります。\nパソコンの Chrome か Edge で作るのがおすすめです。\nこのまま続けますか?', '続ける', false)) return;
+    sink = { write: u8 => { parts.push(u8); } };
+  }
+  zipBusy = true; let cancel = false;
+  const box = dlg('<h3>ZIP を作っています</h3><div class="stat"><div class="big" id="zN">0 / ' + list.length + '</div><div class="bar big" style="margin:10px 0"><i id="zBar"></i></div><div class="mut" id="zInfo">この画面を開いたままにしてください</div></div><div class="row"><button class="btn ghost" id="zCancel">やめる</button></div>');
+  box.querySelector('#zCancel').onclick = () => { cancel = true; };
+  const info = t => { const e = $('#zInfo'); if (e) e.textContent = t; };
+  const failed = [], used = new Set(), rows = ['保存名,元のファイル名,撮影日時,アルバム,お気に入り'], csv = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const albName = id => (albums.find(a => a.id === id) || {}).name || '';
+  try {
+    const zip = new ZipWriter(sink, {});
+    const fetchOne = it => getBytes(ref(st, ST_DIR + it.id)).then(b => open(new Uint8Array(b)));
+    const win = []; let next = 0, done = 0, bytes = 0;
+    const fill = () => { while (win.length < 3 && next < list.length) { const it = list[next++], p = fetchOne(it); p.catch(() => { }); win.push({ it, p }); } };
+    fill();
+    while (win.length) {
+      if (cancel) throw new Error('cancel');
+      const { it, p } = win.shift(); fill();
+      try {
+        const u8 = await p, d = new Date(it.m.d || 0);
+        let base = (it.m.n || it.id).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
+        let nm = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '/' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '_' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()) + '_' + base;
+        for (let k = 2; used.has(nm); k++) nm = nm.replace(/(\.[^./]*)?$/, '_' + k + '$1');
+        used.add(nm); await zip.add(nm, u8, it.m.d || Date.now()); bytes += u8.length;
+        rows.push([csv(nm), csv(it.m.n || ''), csv(d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes())), csv(albName(it.m.alb)), it.m.fav ? '1' : ''].join(','));
+      } catch (e) { failed.push((it.m.n || it.id) + '  ' + (e.message || e)); }
+      done++; const n = $('#zN'); if (n) n.textContent = done + ' / ' + list.length; const bar = $('#zBar'); if (bar) bar.style.width = Math.round(done / list.length * 100) + '%'; info(fmtSize(bytes) + ' / 約 ' + fmtSize(total) + '  この画面を開いたままにしてください');
+    }
+    const te = new TextEncoder(), bom = new Uint8Array([0xEF, 0xBB, 0xBF]), cat = (...a) => { const o = new Uint8Array(a.reduce((s, x) => s + x.length, 0)); let k = 0; for (const x of a) { o.set(x, k); k += x.length; } return o; };
+    await zip.add('一覧.csv', cat(bom, te.encode(rows.join('\r\n') + '\r\n')), Date.now());
+    if (failed.length) await zip.add('取得できなかったファイル.txt', te.encode(failed.join('\r\n')), Date.now());
+    await zip.finish();
+    if (w) { await w.close(); w = null; }
+    else { const u = URL.createObjectURL(new Blob(parts, { type: 'application/zip' })), a = document.createElement('a'); a.href = u; a.download = fname; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); }
+    closeDlg(); zipBusy = false;
+    dlg('<h3>ZIP を保存しました</h3><div class="stat"><div class="big">' + (list.length - failed.length) + '件</div><div>' + esc(fname) + '</div>' + (failed.length ? '<div class="mut" style="color:var(--danger)">' + failed.length + '件は取得できませんでした(ZIP の中に一覧を入れました)</div>' : '<div class="mut">月ごとのフォルダに分けてあります。一覧.csv も入っています</div>') + '<div class="mut">USB と、別の場所の2か所に置いてください。この ZIP は暗号がかかっていません。保管に注意してください</div></div><div class="row"><button class="btn" id="dNo">閉じる</button></div>').querySelector('#dNo').onclick = closeDlg;
+  } catch (e) {
+    try { if (w) await w.abort(); } catch (x) { }
+    closeDlg(); zipBusy = false; toast(e.message === 'cancel' ? 'やめました(保存したファイルは消えます)' : 'ZIP を作れませんでした: ' + (e.message || e));
+  }
+}
