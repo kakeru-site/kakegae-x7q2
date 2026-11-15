@@ -332,11 +332,19 @@ function renderUp() {
   main.querySelectorAll('.cell img').forEach(i => thumbIO.observe(i));
   drawJobs();
 }
-function drawJobs() {
+let drawT = 0;
+function drawJobs() { if (drawT) return; drawT = setTimeout(() => { drawT = 0; drawJobsNow(); }, 150); }   // 何百件でも重くならないよう、まとめて描く
+function drawJobsNow() {
   const j = $('#jobs'); if (!j) return;
   const lab = { wait: '待機中', run: '送信中', ok: '完了', dup: '保存済み', err: '失敗' };
-  j.innerHTML = jobs.map(x => '<div class="job"><span class="n">' + esc(x.f.name) + '</span><span class="s ' + x.st + '">' + lab[x.st] + (x.err ? ' (' + esc(x.err) + ')' : '') + '</span></div>' + (x.st === 'run' ? '<div class="bar"><i style="width:' + Math.round(x.p) + '%"></i></div>' : '')).join('');
-  if (jobs.length) { const ok = jobs.filter(x => x.st === 'ok').length, dup = jobs.filter(x => x.st === 'dup').length, left = jobs.filter(x => x.st === 'wait' || x.st === 'run').length; j.insertAdjacentHTML('afterbegin', '<div style="padding:4px 0 10px;font-size:13px;color:var(--sub)">' + jobs.length + '件中  完了 ' + ok + ' / 重複 ' + dup + (left ? ' / 残り ' + left : '') + '</div>'); }
+  const cnt = { wait: 0, run: 0, ok: 0, dup: 0, err: 0 }; for (const x of jobs) cnt[x.st]++;
+  if (!jobs.length) { j.innerHTML = ''; return; }
+  const done = cnt.ok + cnt.dup + cnt.err, pct = Math.round(done / jobs.length * 100);
+  let h = '<div class="sum"><div class="bar big"><i style="width:' + pct + '%"></i></div><div class="sumt">' + done + ' / ' + jobs.length + '件 処理済み(完了 ' + cnt.ok + (cnt.dup ? ' / 保存済み ' + cnt.dup : '') + (cnt.err ? ' / 失敗 ' + cnt.err : '') + ')</div>' + (cnt.err && !cnt.run && !cnt.wait ? '<button class="btn" id="retry" style="margin:8px 0">失敗した ' + cnt.err + '件をもう一度送る</button>' : '') + (cnt.run + cnt.wait ? '<div class="sumt">アップ中は、この画面を開いたままにしてください</div>' : '') + '</div>';
+  const show = jobs.filter(x => x.st === 'run' || x.st === 'err').slice(0, 12);
+  h += show.map(x => '<div class="job"><span class="n">' + esc(x.f.name) + '</span><span class="s ' + x.st + '">' + lab[x.st] + '</span></div>' + (x.err ? '<div class="jerr">' + esc(String(x.err).slice(0, 80)) + '</div>' : '') + (x.st === 'run' ? '<div class="bar"><i style="width:' + Math.round(x.p) + '%"></i></div>' : '')).join('');
+  j.innerHTML = h;
+  const r = $('#retry'); if (r) r.onclick = () => { jobs.forEach(x => { if (x.st === 'err') { x.st = 'wait'; x.err = ''; x.tries = 0; } }); runJobs(); };
 }
 $('#file').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; stage(fs); };
 function putBlob(path, u8, onp) {
@@ -346,6 +354,7 @@ function putBlob(path, u8, onp) {
 }
 async function runJobs() {
   if (running) return; running = true;
+  let wl = null; try { wl = await navigator.wakeLock.request('screen'); } catch (e) { }   // アップ中は画面を消さない
   const worker = async () => {
     for (; ;) {
       const j = jobs.find(x => x.st === 'wait'); if (!j) return; j.st = 'run'; j.p = 2; drawJobs();
@@ -369,12 +378,17 @@ async function runJobs() {
         await docPut({ id, meta, thumb: tb, del: 0, mod: Date.now() });
         itemMap.set(id, { id, m, tb }); rebuild();
         j.st = 'ok'; j.p = 100; drawJobs();
-      } catch (e) { j.st = 'err'; j.err = e.message || String(e); if (j.id) seen.delete(j.id); drawJobs(); }
+      } catch (e) {
+        if (j.id) seen.delete(j.id);
+        if ((j.tries = (j.tries || 0) + 1) < 3) { j.st = 'wait'; await new Promise(r => setTimeout(r, 1500 * j.tries)); }   // 電波が弱いときは自動で2回までやり直す
+        else { j.st = 'err'; j.err = e.message || String(e); }
+        drawJobs();
+      }
     }
   };
-  const t = setInterval(drawJobs, 400);
+  const t = setInterval(drawJobs, 500);
   await Promise.all([worker(), worker(), worker(), worker()]);
-  clearInterval(t); drawJobs(); running = false;
+  clearInterval(t); drawJobs(); running = false; try { wl && wl.release(); } catch (e) { }
   const ok = jobs.filter(x => x.st === 'ok').length; if (ok) toast(ok + '件を保存しました');
 }
 /* サムネイル・サイズ・撮影日 */
