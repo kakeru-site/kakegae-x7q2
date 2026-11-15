@@ -335,7 +335,7 @@ function renderUp() {
   main.insertAdjacentHTML('beforeend', '<div id="goBar"><button class="btn" id="goUp"' + (n ? '' : ' disabled') + '>' + n + '件をアップロード</button><button class="btn ghost" id="goNo">やめる</button></div>');
   $('#pick').onclick = () => $('#file').click();
   $('#goNo').onclick = () => { staged = []; stageSkipped = 0; $('#goBar') && $('#goBar').remove(); renderUp(); };
-  $('#goUp').onclick = () => { for (const x of staged) if (x.ck) jobs.push({ f: x.f, st: 'wait', p: 0 }); staged = []; stageSkipped = 0; renderUp(); runJobs(); };
+  $('#goUp').onclick = () => { let n = 0; for (const x of staged) if (x.ck) { jobs.push({ f: x.f, st: 'wait', p: 0 }); n++; } staged = []; stageSkipped = 0; renderUp(); toast(n + '件の送信を始めます'); runJobs(); };
   main.querySelectorAll('[data-mo]').forEach(bt => bt.onclick = () => { const L = by[bt.dataset.mo], all = L.every(x => x.ck); L.forEach(x => x.ck = !all); const y = main.scrollTop; renderUp(); $('#main').scrollTop = y; });
   main.querySelectorAll('.cell').forEach(c => { c.onclick = () => { const x = staged[c.dataset.i]; x.ck = !x.ck; renderUp.keep = main.scrollTop; const y = main.scrollTop; renderUp(); $('#main').scrollTop = y; }; });
   if (thumbIO) thumbIO.disconnect();
@@ -365,19 +365,19 @@ function putBlob(path, u8, onp) {
 }
 async function runJobs() {
   if (running) return; running = true;
-  let wl = null; try { wl = await navigator.wakeLock.request('screen'); } catch (e) { }   // アップ中は画面を消さない
+  let wl = null; try { navigator.wakeLock.request('screen').then(l => { wl = l; if (!running) l.release(); }).catch(() => { }); } catch (e) { }   // アップ中は画面を消さない(返事は待たない)
   const worker = async () => {
     for (; ;) {
       const j = jobs.find(x => x.st === 'wait'); if (!j) return; j.st = 'run'; j.p = 2; drawJobs();
-      try {
+      try { await Promise.race([(async () => {
         const buf = new Uint8Array(await j.f.arrayBuffer());
         const id = j.id = hex(new Uint8Array(await crypto.subtle.sign('HMAC', HKEY, buf)));
-        if (seen.has(id)) { j.st = 'dup'; drawJobs(); continue; }
+        if (seen.has(id)) { j.st = 'dup'; drawJobs(); return; }
         seen.add(id);
         const isV = j.f.type.startsWith('video/');
         const infoP = isV ? videoInfo(j.f) : imageInfo(j.f, buf);                                   // 重複確認と同時に進める
         const remote = await getDoc(doc(db, C_ITEM, id));
-        if (remote.exists() && !remote.data().del) { j.st = 'dup'; drawJobs(); continue; }
+        if (remote.exists() && !remote.data().del) { j.st = 'dup'; drawJobs(); return; }
         const [info, sealed] = await Promise.all([infoP, seal(buf)]); j.p = 15; drawJobs();
         const m = { n: j.f.name, t: isV ? 'v' : 'i', mt: j.f.type, s: j.f.size, w: info.w, h: info.h, d: info.d || j.f.lastModified || Date.now(), dur: info.dur };
         if (!m.w) { delete m.w; delete m.h; } if (!m.dur) delete m.dur;
@@ -389,7 +389,7 @@ async function runJobs() {
         await docPut({ id, meta, thumb: tb, del: 0, mod: Date.now() });
         itemMap.set(id, { id, m, tb }); rebuild();
         j.st = 'ok'; j.p = 100; drawJobs();
-      } catch (e) {
+      })(), new Promise((_, rej) => setTimeout(() => rej(new Error('時間切れ(通信が止まりました)')), 120000 + j.f.size / 40000))]); } catch (e) {
         if (j.id) seen.delete(j.id);
         if ((j.tries = (j.tries || 0) + 1) < 3) { j.st = 'wait'; await new Promise(r => setTimeout(r, 1500 * j.tries)); }   // 電波が弱いときは自動で2回までやり直す
         else { j.st = 'err'; j.err = e.name === 'NotReadableError' ? 'ファイルを読み込めません(iCloudの写真は、先に端末へダウンロードしてください)' : (e.message || String(e)); }
@@ -450,3 +450,6 @@ function exifDate(u8) {
 }
 
 lockInit().catch(e => { $('#lockMsg').textContent = '接続できませんでした'; });
+
+window.addEventListener('error', e => { try { toast('エラー: ' + (e.message || '')); } catch (x) { } });
+window.addEventListener('unhandledrejection', e => { try { toast('エラー: ' + ((e.reason && e.reason.message) || e.reason || '')); } catch (x) { } });
