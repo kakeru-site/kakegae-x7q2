@@ -4,7 +4,7 @@
    - 速さ: 一覧は端末に(暗号化したまま)覚えておき、2回目からは新しい分だけ取る。アップは4枚同時 */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, query, where, Timestamp, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { ZipWriter } from "./zip.js?v=12";
+import { ZipWriter } from "./zip.js?v=13";
 import { getStorage, ref, uploadBytes, uploadBytesResumable, getBytes, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const app = initializeApp({
@@ -13,7 +13,7 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
-const APP_VER = '12';
+const APP_VER = '13';
 const dbgLog = [];
 function dbg(m) { const d = new Date(); dbgLog.push(String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + ' ' + m); while (dbgLog.length > 8) dbgLog.shift(); const b = document.querySelector('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
@@ -136,6 +136,7 @@ async function sync() {
 }
 
 /* ---------- 画面 ---------- */
+let curTitle = '', dragSkip = false;
 let tab = 'all', curAlb = null, selMode = false, picked = new Set();
 const fmtDay = ms => { const d = new Date(ms); return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
 const fmtDur = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
@@ -149,6 +150,25 @@ function go(t, alb) {
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.dataset.t));
 $('#selBtn').onclick = () => { selMode = !selMode; picked.clear(); render(); };
+/* ---- iPhone の写真アプリのように、指でなぞって選ぶ ---- */
+function updSel() { if (selMode) $('#ttl').textContent = picked.size ? picked.size + '件を選択中' : curTitle; }
+function setPicked(c, on) { const id = c.dataset.id; if (picked.has(id) === on) return; on ? picked.add(id) : picked.delete(id); c.classList.toggle('picked', on); const k = c.querySelector('.chk'); if (k) k.textContent = on ? '✓' : ''; updSel(); }
+function bindDragSelect(main) {
+  const cont = main.querySelector('.sel'); if (!cont) return;
+  let s = null, raf = 0, py = 0;
+  const cellAt = (x, y) => { const e = document.elementFromPoint(x, y); return e && e.closest ? e.closest('.cell') : null; };
+  const loop = () => { if (!s || !s.drag) { raf = 0; return; } const r = main.getBoundingClientRect(); if (py < r.top + 70) main.scrollTop -= Math.min(22, (r.top + 70 - py) / 3 + 4); else if (py > r.bottom - 70) main.scrollTop += Math.min(22, (py - (r.bottom - 70)) / 3 + 4); const c = cellAt(s.x, py); if (c) setPicked(c, s.on); raf = requestAnimationFrame(loop); };
+  cont.onpointerdown = e => { const c = e.target.closest ? e.target.closest('.cell') : null; if (!c) return; s = { id: c.dataset.id, c, x0: e.clientX, y0: e.clientY, x: e.clientX, on: !picked.has(c.dataset.id), drag: false }; py = e.clientY; };
+  cont.onpointermove = e => {
+    if (!s) return; s.x = e.clientX; py = e.clientY;
+    if (!s.drag) { if (Math.hypot(e.clientX - s.x0, e.clientY - s.y0) < 8) return; s.drag = true; setPicked(s.c, s.on); if (!raf) raf = requestAnimationFrame(loop); }
+    const c = cellAt(e.clientX, e.clientY); if (c) setPicked(c, s.on);
+    if (e.cancelable) e.preventDefault();
+  };
+  const end = () => { if (s && s.drag) { dragSkip = true; setTimeout(() => dragSkip = false, 80); } s = null; };
+  cont.onpointerup = end; cont.onpointercancel = end; cont.onpointerleave = null;
+}
+$('#allBtn').onclick = () => { const L = list(); if (picked.size >= L.length) picked.clear(); else L.forEach(i => picked.add(i.id)); render(); };
 function list() {
   if (tab === 'fav') return items.filter(i => i.m.fav);
   if (tab === 'alb' && curAlb) return items.filter(i => i.m.alb === curAlb);
@@ -157,12 +177,13 @@ function list() {
 function render() {
   const main = $('#main'), canSel = tab === 'all' || tab === 'fav' || curAlb, sel = selMode && canSel;
   $('#selBtn').classList.toggle('hide', !canSel);
-  $('#selBtn').textContent = sel ? 'やめる' : '選択';
+  $('#selBtn').textContent = sel ? 'やめる' : '選択'; $('#allBtn').classList.toggle('hide', !sel);
   $('#selbar').classList.toggle('hide', !sel); main.style.paddingBottom = sel ? '70px' : '0';
   if (tab === 'up') { $('#ttl').textContent = 'アップロード'; return renderUp(); }
   if (tab === 'alb' && !curAlb) { $('#ttl').textContent = 'アルバム'; return renderAlbums(); }
   const alb = curAlb && albums.find(a => a.id === curAlb);
-  $('#ttl').textContent = tab === 'fav' ? 'お気に入り' : alb ? alb.name : '写真';
+  $('#ttl').textContent = curTitle = tab === 'fav' ? 'お気に入り' : alb ? alb.name : '写真';
+  $('#allBtn').classList.toggle('hide', !sel); updSel();
   const L = list();
   if (!L.length) { main.innerHTML = (alb ? albumBar() : '') + '<div class="empty">' + (tab === 'fav' ? 'ハートを付けた写真がここに集まります' : alb ? 'このアルバムは空です' : 'まだ何もありません<br>下の「アップ」から入れてください') + '</div>'; bindAlbBar(alb); return; }
   let h = alb ? albumBar() : '', last = '';
@@ -180,10 +201,12 @@ function render() {
     if (it._u) img.src = it._u; else { const p = thumbOf(it); if (p) Promise.resolve(p).then(u => { if (u && c.isConnected) img.src = u; }); }
     c.onclick = () => {
       const id = c.dataset.id;
-      if (sel) { picked.has(id) ? picked.delete(id) : picked.add(id); c.classList.toggle('picked'); c.querySelector('.chk').textContent = picked.has(id) ? '✓' : ''; }
+      if (dragSkip) return;
+      if (sel) { setPicked(c, !picked.has(id)); }
       else openViewer(L, id);
     };
   });
+  if (sel) bindDragSelect(main);
   bindAlbBar(alb);
 }
 const albumBar = () => '<div class="albbar"><button class="btn ghost" id="albBack">‹ 戻る</button><button class="btn ghost" id="albRen">名前</button><button class="btn ghost" id="albDel">アルバムを削除</button></div>';

@@ -48,6 +48,7 @@ nav button.on{color:var(--acc)}
 .jerr{font-size:11px;color:var(--danger);padding:0 0 6px;word-break:break-all}.bar.big{height:8px;border-radius:4px}.sumt{font-size:13px;color:var(--sub);padding:6px 0}
 #dbgbox{margin:14px 0 4px;padding:8px 10px;border-radius:10px;background:#0006;font-size:11px;line-height:1.6;color:var(--sub);word-break:break-all;white-space:pre-line}
 #vcm{color:#fff;font-size:14px;line-height:1.6;padding:8px 16px;max-height:22vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#000;cursor:pointer}#vcm.empty{color:#888;font-size:13px}.cell .cm{position:absolute;left:5px;top:5px;font-size:13px;text-shadow:0 1px 3px #000}.rv .cell .cm{display:none}#dlg textarea{width:100%;min-height:130px;padding:12px;border-radius:12px;border:1px solid var(--line);background:#0006;color:var(--ink);font:inherit;font-size:16px;line-height:1.6;resize:vertical}
+.sel .cell{touch-action:pan-y;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.sel .cell img{pointer-events:none}
 .cell img{width:100%;height:100%;object-fit:cover;display:block}
 .cell .fav{position:absolute;right:5px;bottom:3px;font-size:14px;text-shadow:0 1px 3px #000}
 .cell .dur{position:absolute;left:5px;bottom:4px;font-size:11px;background:#000a;padding:1px 6px;border-radius:8px}
@@ -103,12 +104,12 @@ nav button.on{color:var(--acc)}
   <input id="pw" type="password" autocomplete="off" placeholder="合言葉">
   <input id="pw2" class="hide" type="password" autocomplete="off" placeholder="もう一度">
   <div id="lockMsg"></div>
-  <div id="ver" style="position:absolute;bottom:12px;font-size:11px;color:#a99bd088">v12</div>
+  <div id="ver" style="position:absolute;bottom:12px;font-size:11px;color:#a99bd088">v13</div>
   <button class="btn" id="lockGo">開く</button><button class="btn ghost hide" id="faceGo">顔認証で開く</button>
 </div>
 
 <div id="app" class="hide">
-  <header><h2 id="ttl">写真</h2><button class="ib" id="selBtn">選択</button><button class="ib" id="setBtn">⚙︎</button><button class="ib" id="lockBtn">🔒</button></header>
+  <header><h2 id="ttl">写真</h2><button class="ib hide" id="allBtn">すべて</button><button class="ib" id="selBtn">選択</button><button class="ib" id="setBtn">⚙︎</button><button class="ib" id="lockBtn">🔒</button></header>
   <main id="main"></main>
   <nav>
     <button data-t="all"><b>🖼</b>写真</button>
@@ -130,5 +131,5 @@ nav button.on{color:var(--acc)}
 <div id="toast"></div>
 <input type="file" id="file" accept="image/*,video/*" multiple style="position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0">
 
-<script type="module" src="app.js?v=12"></script>
+<script type="module" src="app.js?v=13"></script>
 </body></html>
