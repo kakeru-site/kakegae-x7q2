@@ -96,7 +96,7 @@ async function relock() { revokeAll(); location.reload(); }
 $('#lockGo').onclick = unlock; $('#faceGo').onclick = () => unlockFace(false); $('#pw').onkeydown = $('#pw2').onkeydown = e => { if (e.key === 'Enter') unlock(); };
 $('#lockBtn').onclick = relock;
 let lockT;
-document.addEventListener('visibilitychange', () => { if (document.hidden && KEY) { clearTimeout(lockT); lockT = setTimeout(() => { if (document.hidden && !running) relock(); }, 5 * 60 * 1000);   // アップ中は自動ロックしない } else clearTimeout(lockT); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && KEY) { clearTimeout(lockT); lockT = setTimeout(() => { if (document.hidden && !running) relock(); }, 5 * 60 * 1000); } else clearTimeout(lockT); });   // アップ中は自動ロックしない
 
 /* ---------- データ(端末のメモ + 新しい分だけ取得) ---------- */
 let items = [], albums = [];
