@@ -4,7 +4,7 @@
    - 速さ: 一覧は端末に(暗号化したまま)覚えておき、2回目からは新しい分だけ取る。アップは4枚同時 */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, query, where, Timestamp, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { ZipWriter } from "./zip.js?v=10";
+import { ZipWriter } from "./zip.js?v=11";
 import { getStorage, ref, uploadBytes, uploadBytesResumable, getBytes, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const app = initializeApp({
@@ -13,7 +13,7 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
-const APP_VER = '10';
+const APP_VER = '11';
 const dbgLog = [];
 function dbg(m) { const d = new Date(); dbgLog.push(String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + ' ' + m); while (dbgLog.length > 8) dbgLog.shift(); const b = document.querySelector('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
@@ -495,13 +495,19 @@ async function backupZip() {
   const albName = id => (albums.find(a => a.id === id) || {}).name || '';
   try {
     const zip = new ZipWriter(sink, {});
-    const fetchOne = it => getBytes(ref(st, ST_DIR + it.id)).then(b => open(new Uint8Array(b)));
+    const fetchOne = async it => {   // 大きいファイルは時間がかかる。止まったら(目安: 1MBあたり数秒+60秒)最大3回やり直す
+      for (let k = 1; ; k++) {
+        try { const lim = 60000 + (it.m.s || 0) / 100000 * 1000; const b = await Promise.race([getBytes(ref(st, ST_DIR + it.id)), new Promise((_, rej) => setTimeout(() => rej(new Error('時間切れ')), lim))]); return await open(new Uint8Array(b)); }
+        catch (e) { if (k >= 3 || cancel) throw e; }
+      }
+    };
     const win = []; let next = 0, done = 0, bytes = 0;
     const fill = () => { while (win.length < 3 && next < list.length) { const it = list[next++], p = fetchOne(it); p.catch(() => { }); win.push({ it, p }); } };
     fill();
     while (win.length) {
       if (cancel) throw new Error('cancel');
       const { it, p } = win.shift(); fill();
+      info('取り込み中: ' + (it.m.n || '') + '(' + fmtSize(it.m.s || 0) + ')  ' + fmtSize(bytes) + ' / 約 ' + fmtSize(total));
       try {
         const u8 = await p, d = new Date(it.m.d || 0);
         let base = (it.m.n || it.id).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
