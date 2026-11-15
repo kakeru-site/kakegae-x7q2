@@ -18,7 +18,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 #lock{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;background:linear-gradient(160deg,#4b2a8f,#1a1033 70%)}
 #lock img{width:96px;height:96px;border-radius:24px;box-shadow:0 10px 30px #0008}
 #lock h1{margin:0;font-size:26px;letter-spacing:.1em}
-#lock p{margin:0;color:var(--sub);font-size:14px;text-align:center;line-height:1.7}
+#lock p{white-space:pre-line;margin:0;color:var(--sub);font-size:14px;text-align:center;line-height:1.7}
 #lock input{width:min(320px,100%);padding:14px;border-radius:14px;border:1px solid var(--line);background:#0006;color:var(--ink);font-size:17px;text-align:center}
 .btn{padding:13px 26px;border-radius:14px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#1a0d33;font-weight:700}
 .btn.ghost{background:var(--card);color:var(--ink)}
@@ -38,6 +38,7 @@ nav button.on{color:var(--acc)}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:0 2px}
 @media(min-width:700px){.grid{grid-template-columns:repeat(6,1fr)}}
 .cell{position:relative;aspect-ratio:1;background:var(--card);overflow:hidden}
+.grid{content-visibility:auto;contain-intrinsic-size:auto 400px}.albbar{padding:10px 14px;display:flex;gap:8px}.stat{line-height:1.8;font-size:14px}.stat .big{font-size:30px;font-weight:700;color:var(--acc)}.stat .mut{color:var(--sub);font-size:12px;margin-top:6px}#vst img.ph{opacity:.7}#faceGo{margin-top:-4px}
 .cell img{width:100%;height:100%;object-fit:cover;display:block}
 .cell .fav{position:absolute;right:5px;bottom:3px;font-size:14px;text-shadow:0 1px 3px #000}
 .cell .dur{position:absolute;left:5px;bottom:4px;font-size:11px;background:#000a;padding:1px 6px;border-radius:8px}
@@ -89,25 +90,25 @@ nav button.on{color:var(--acc)}
 <div id="lock">
   <img src="icon.svg" alt="">
   <h1>かけがえ</h1>
-  <p id="lockSub">あいことばを いれてね</p>
-  <input id="pw" type="password" autocomplete="off" placeholder="あいことば">
-  <input id="pw2" class="hide" type="password" autocomplete="off" placeholder="もういちど">
+  <p id="lockSub">合言葉を入力してください</p>
+  <input id="pw" type="password" autocomplete="off" placeholder="合言葉">
+  <input id="pw2" class="hide" type="password" autocomplete="off" placeholder="もう一度">
   <div id="lockMsg"></div>
-  <button class="btn" id="lockGo">ひらく</button>
+  <button class="btn" id="lockGo">開く</button><button class="btn ghost hide" id="faceGo">顔認証で開く</button>
 </div>
 
 <div id="app" class="hide">
-  <header><h2 id="ttl">しゃしん</h2><button class="ib" id="selBtn">えらぶ</button><button class="ib" id="lockBtn">🔒</button></header>
+  <header><h2 id="ttl">写真</h2><button class="ib" id="selBtn">選択</button><button class="ib" id="setBtn">⚙︎</button><button class="ib" id="lockBtn">🔒</button></header>
   <main id="main"></main>
   <nav>
-    <button data-t="all"><b>🖼</b>しゃしん</button>
-    <button data-t="fav"><b>♡</b>おきにいり</button>
+    <button data-t="all"><b>🖼</b>写真</button>
+    <button data-t="fav"><b>♡</b>お気に入り</button>
     <button data-t="alb"><b>📁</b>アルバム</button>
     <button data-t="up"><b>⬆︎</b>アップ</button>
   </nav>
 </div>
 <div id="selbar" class="hide">
-  <button id="sbAlb">📁 アルバムへ</button><button id="sbFav">♡ おきにいり</button><button id="sbDl">⬇︎ ほぞん</button><button id="sbDel">🗑 けす</button>
+  <button id="sbAlb">📁 アルバムへ</button><button id="sbFav">♡ お気に入り</button><button id="sbDl">⬇︎ 保存</button><button id="sbDel">🗑 削除</button>
 </div>
 <div id="viewer" class="hide">
   <div class="top"><button id="vClose">✕</button><div class="t" id="vTitle"></div><button id="vInfo">⋯</button></div>

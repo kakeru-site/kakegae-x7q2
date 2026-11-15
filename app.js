@@ -1,9 +1,10 @@
-/* かけがえ: かける専用の しゃしん ほぞんアプリ
-   - ぜんぶ ブラウザの中で あんごうか(AES-GCM)してから Firebase に おくる。あいことばは どこにも ほぞんしない
-   - おなじ しゃしんは ひとつだけ: 中身から HMAC の ID を つくり、同じ ID は ぜったいに 2つ できない */
+/* かけがえ: かける専用の写真保存アプリ
+   - 写真・動画はブラウザの中で暗号化(AES-GCM)してから Firebase に送る。合言葉はどこにも保存しない
+   - 同じ写真は1枚だけ: 中身から HMAC の ID を作り、同じ ID は2つ作れない
+   - 速さ: 一覧は端末に(暗号化したまま)覚えておき、2回目からは新しい分だけ取る。アップは4枚同時 */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getStorage, ref, uploadBytes, getBytes, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, query, where, Timestamp, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, uploadBytesResumable, getBytes, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const app = initializeApp({
   apiKey: "AIzaSyDMFs-m2sIJzXa2sKtG7DVhKNNBcU4Ahr8", authDomain: "batarungotai.firebaseapp.com", projectId: "batarungotai",
@@ -13,7 +14,21 @@ const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
 
-/* ---------- あんごう ---------- */
+/* ---------- 端末のメモ(IndexedDB。中身は暗号化したまま) ---------- */
+let _idb = null;
+function idb() {
+  return _idb || (_idb = new Promise((res, rej) => {
+    try { const q = indexedDB.open('kakegae', 1); q.onupgradeneeded = () => { q.result.createObjectStore('docs', { keyPath: 'id' }); q.result.createObjectStore('kv'); }; q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); } catch (e) { rej(e); }
+  }).catch(() => null));
+}
+async function tx(store, mode, fn) {
+  const d = await idb(); if (!d) return null;
+  return new Promise(res => { try { const t = d.transaction(store, mode), s = t.objectStore(store), r = fn(s); t.oncomplete = () => res(r && r.result !== undefined ? r.result : null); t.onerror = t.onabort = () => res(null); } catch (e) { res(null); } });
+}
+const kvGet = k => tx('kv', 'readonly', s => s.get(k)), kvSet = (k, v) => tx('kv', 'readwrite', s => s.put(v, k)), kvDel = k => tx('kv', 'readwrite', s => s.delete(k));
+const docAll = () => tx('docs', 'readonly', s => s.getAll()), docPut = r => tx('docs', 'readwrite', s => s.put(r)), docClear = () => tx('docs', 'readwrite', s => s.clear());
+
+/* ---------- 暗号 ---------- */
 const b64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const hex = u8 => [...u8].map(x => x.toString(16).padStart(2, '0')).join('');
@@ -30,51 +45,89 @@ const sealJson = async o => b64(await seal(enc.encode(JSON.stringify(o))));
 const openJson = async s => JSON.parse(dec.decode(await open(unb64(s))));
 
 /* ---------- ロック画面 ---------- */
-let first = false, salt = null;
+let first = false, salt = null, check = null, fid = null;
 async function lockInit() {
   const m = await getDoc(doc(db, C_META, 'main'));
-  if (!m.exists()) { first = true; $('#lockSub').textContent = 'はじめて だね。あたらしい あいことばを きめてね\n(わすれたら ひらけなく なるよ)'; $('#lockSub').style.whiteSpace = 'pre-line'; $('#pw2').classList.remove('hide'); $('#lockGo').textContent = 'きめる'; }
-  else salt = unb64(m.data().salt), window.__check = m.data().check;
+  if (!m.exists()) { first = true; $('#lockSub').textContent = '初めて開きます。新しい合言葉を決めてください\n(忘れると二度と開けません)'; $('#pw2').classList.remove('hide'); $('#lockGo').textContent = '決める'; return; }
+  salt = unb64(m.data().salt); check = m.data().check;
+  fid = await kvGet('face');
+  if (fid && fid.salt === m.data().salt && window.PublicKeyCredential) { $('#faceGo').classList.remove('hide'); unlockFace(true); }
+}
+async function finishUnlock() {
+  $('#lock').classList.add('hide'); $('#app').classList.remove('hide'); $('#pw').value = $('#pw2').value = '';
+  $('#main').innerHTML = '<div class="empty">読み込み中…</div>'; await loadAll();
 }
 async function unlock() {
   const pw = $('#pw').value, msg = $('#lockMsg'); msg.textContent = '';
   if (!pw) return;
-  $('#lockGo').disabled = true; msg.textContent = 'ひらいています…';
+  $('#lockGo').disabled = true; msg.textContent = '開いています…';
   try {
     if (first) {
-      if (pw.length < 6) { msg.textContent = '6もじ いじょうに してね'; return; }
-      if (pw !== $('#pw2').value) { msg.textContent = 'ふたつが ちがうよ'; return; }
+      if (pw.length < 6) { msg.textContent = '6文字以上にしてください'; return; }
+      if (pw !== $('#pw2').value) { msg.textContent = '2つが一致しません'; return; }
       salt = crypto.getRandomValues(new Uint8Array(16)); await derive(pw, salt);
       await setDoc(doc(db, C_META, 'main'), { salt: b64(salt), check: await sealJson({ ok: 'kakegae' }), at: serverTimestamp() });
     } else {
       await derive(pw, salt);
-      try { const r = await openJson(window.__check); if (r.ok !== 'kakegae') throw 0; } catch (e) { KEY = HKEY = null; msg.textContent = 'あいことばが ちがうよ'; return; }
+      try { const r = await openJson(check); if (r.ok !== 'kakegae') throw 0; } catch (e) { KEY = HKEY = null; msg.textContent = '合言葉が違います'; return; }
     }
-    $('#lock').classList.add('hide'); $('#app').classList.remove('hide'); $('#pw').value = $('#pw2').value = '';
-    await loadAll(); go('all');
-  } catch (e) { msg.textContent = 'うまく いかなかったよ(' + (e.message || e) + ')'; }
+    await finishUnlock();
+  } catch (e) { msg.textContent = 'うまくいきませんでした(' + (e.message || e) + ')'; }
   finally { $('#lockGo').disabled = false; }
 }
-function relock() { KEY = HKEY = null; items = []; albums = []; revokeAll(); location.reload(); }
-$('#lockGo').onclick = unlock; $('#pw').onkeydown = $('#pw2').onkeydown = e => { if (e.key === 'Enter') unlock(); };
+async function unlockFace(auto) {
+  if (!fid) return; const msg = $('#lockMsg');
+  try {
+    await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ id: fid.cred, type: 'public-key', transports: ['internal'] }], userVerification: 'required', timeout: 60000, rpId: location.hostname } });
+    KEY = fid.key; HKEY = fid.hkey;
+    try { const r = await openJson(check); if (r.ok !== 'kakegae') throw 0; } catch (e) { KEY = HKEY = null; await kvDel('face'); fid = null; $('#faceGo').classList.add('hide'); msg.textContent = '顔認証の登録が古くなりました。合言葉で開いてください'; return; }
+    await finishUnlock();
+  } catch (e) { if (!auto) msg.textContent = '顔認証で開けませんでした。合言葉でも開けます'; }
+}
+async function enrollFace() {
+  if (!window.PublicKeyCredential) return toast('この端末は顔認証に対応していません');
+  try {
+    const c = await navigator.credentials.create({ publicKey: { rp: { name: 'かけがえ', id: location.hostname }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'kakeru', displayName: 'かける' }, challenge: crypto.getRandomValues(new Uint8Array(32)), pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' }, timeout: 60000 } });
+    await kvSet('face', { cred: new Uint8Array(c.rawId), key: KEY, hkey: HKEY, salt: b64(salt) });
+    fid = await kvGet('face'); toast(fid ? '顔認証で開けるようにしました' : '登録できませんでした');
+  } catch (e) { toast('登録をやめました'); }
+}
+async function relock() { revokeAll(); location.reload(); }
+$('#lockGo').onclick = unlock; $('#faceGo').onclick = () => unlockFace(false); $('#pw').onkeydown = $('#pw2').onkeydown = e => { if (e.key === 'Enter') unlock(); };
 $('#lockBtn').onclick = relock;
-document.addEventListener('visibilitychange', () => { if (document.hidden && KEY) { clearTimeout(lockT); lockT = setTimeout(() => { if (document.hidden) relock(); }, 5 * 60 * 1000); } else clearTimeout(lockT); });
 let lockT;
+document.addEventListener('visibilitychange', () => { if (document.hidden && KEY) { clearTimeout(lockT); lockT = setTimeout(() => { if (document.hidden) relock(); }, 5 * 60 * 1000); } else clearTimeout(lockT); });
 
-/* ---------- データ ---------- */
-let items = [], albums = [];   // items: {id, m:{n,t,s,w,h,d,dur,fav,alb}, thumb:url}
-const urls = new Set();
+/* ---------- データ(端末のメモ + 新しい分だけ取得) ---------- */
+let items = [], albums = [];
+const itemMap = new Map(), seen = new Set(), urls = new Set(), modMap = new Map();
 const blobUrl = (u8, type) => { const u = URL.createObjectURL(new Blob([u8], { type })); urls.add(u); return u; };
 function revokeAll() { urls.forEach(u => URL.revokeObjectURL(u)); urls.clear(); }
+const thumbOf = it => { if (it._u) return it._u; if (!it.tb) return ''; return it._p || (it._p = open(unb64(it.tb)).then(u8 => { it._u = blobUrl(u8, 'image/jpeg'); return it._u; }).catch(() => '')); };
+async function ingest(rec) {
+  modMap.set(rec.id, rec.mod);
+  if (rec.del) { itemMap.delete(rec.id); seen.delete(rec.id); return; }
+  try { const old = itemMap.get(rec.id); const m = await openJson(rec.meta); const it = { id: rec.id, m, tb: rec.thumb || '' }; if (old && old.tb === it.tb) { it._u = old._u; it._p = old._p; } itemMap.set(rec.id, it); seen.add(rec.id); } catch (e) { }
+}
+const rebuild = () => { items = [...itemMap.values()].sort((p, q) => q.m.d - p.m.d); };
 async function loadAll() {
-  const [a, b] = await Promise.all([getDocs(collection(db, C_ITEM)), getDocs(collection(db, C_ALB))]);
-  const out = [];
-  await Promise.all(a.docs.map(async d => {
-    try { const x = d.data(); const m = await openJson(x.meta); out.push({ id: d.id, m, thumb: x.thumb ? blobUrl(await open(unb64(x.thumb)), 'image/jpeg') : '' }); } catch (e) { }
-  }));
-  items = out.sort((p, q) => q.m.d - p.m.d);
-  const al = [];
-  await Promise.all(b.docs.map(async d => { try { al.push({ id: d.id, ...(await openJson(d.data().meta)) }); } catch (e) { } }));
+  const sv = await kvGet('salt');
+  if (sv !== b64(salt)) { await docClear(); await kvDel('last'); await kvSet('salt', b64(salt)); }
+  const cached = (await docAll()) || [];
+  await Promise.all(cached.map(ingest)); rebuild();
+  const fresh = cached.length === 0;
+  const done = sync(); if (fresh) await done;
+  go('all'); done.then(() => { if (!document.hidden) { rebuild(); if (!['up'].includes(tab) && $('#viewer').classList.contains('hide')) render(); } }).catch(() => { });
+}
+async function sync() {
+  const last = await kvGet('last');
+  const q = last ? query(collection(db, C_ITEM), where('mod', '>', Timestamp.fromMillis(last - 3000))) : collection(db, C_ITEM);
+  const [a, b] = await Promise.all([getDocs(q), getDocs(collection(db, C_ALB))]);
+  let mx = last || 0; const recs = [];
+  for (const d of a.docs) { const x = d.data(), mod = x.mod && x.mod.toMillis ? x.mod.toMillis() : 0; recs.push({ id: d.id, meta: x.meta, thumb: x.thumb || '', del: x.del ? 1 : 0, mod }); mx = Math.max(mx, mod); }
+  await Promise.all(recs.map(async r => { await docPut(r.del ? { id: r.id, del: 1, mod: r.mod } : r); await ingest(r); }));
+  await kvSet('last', mx); rebuild();
+  const al = []; await Promise.all(b.docs.map(async d => { try { al.push({ id: d.id, ...(await openJson(d.data().meta)) }); } catch (e) { } }));
   albums = al.sort((p, q) => p.at - q.at);
 }
 
@@ -82,7 +135,9 @@ async function loadAll() {
 let tab = 'all', curAlb = null, selMode = false, picked = new Set();
 const fmtDay = ms => { const d = new Date(ms); return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
 const fmtDur = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
-function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('on'), 2200); }
+const fmtSize = n => n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' GB' : (n / 1048576).toFixed(1) + ' MB';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('on'), 2400); }
 function go(t, alb) {
   tab = t; curAlb = alb || null; selMode = false; picked.clear();
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
@@ -96,163 +151,204 @@ function list() {
   return items;
 }
 function render() {
-  const main = $('#main'), sel = selMode && (tab === 'all' || tab === 'fav' || curAlb);
-  $('#selBtn').classList.toggle('hide', !(tab === 'all' || tab === 'fav' || curAlb));
-  $('#selBtn').textContent = sel ? 'やめる' : 'えらぶ';
+  const main = $('#main'), canSel = tab === 'all' || tab === 'fav' || curAlb, sel = selMode && canSel;
+  $('#selBtn').classList.toggle('hide', !canSel);
+  $('#selBtn').textContent = sel ? 'やめる' : '選択';
   $('#selbar').classList.toggle('hide', !sel); main.style.paddingBottom = sel ? '70px' : '0';
   if (tab === 'up') { $('#ttl').textContent = 'アップロード'; return renderUp(); }
   if (tab === 'alb' && !curAlb) { $('#ttl').textContent = 'アルバム'; return renderAlbums(); }
   const alb = curAlb && albums.find(a => a.id === curAlb);
-  $('#ttl').textContent = tab === 'fav' ? 'おきにいり' : alb ? alb.name : 'しゃしん';
+  $('#ttl').textContent = tab === 'fav' ? 'お気に入り' : alb ? alb.name : '写真';
   const L = list();
-  if (!L.length) { main.innerHTML = '<div class="empty">' + (tab === 'fav' ? 'ハートを つけた しゃしんが ここに あつまるよ' : 'まだ なにも ないよ<br>したの「アップ」から いれてね') + '</div>'; return; }
-  let h = '', last = '';
-  if (alb) h += '<div style="padding:10px 14px;display:flex;gap:8px"><button class="btn ghost" id="albBack">‹ もどる</button><button class="btn ghost" id="albRen">なまえ</button><button class="btn ghost" id="albDel">アルバムを けす</button></div>';
+  if (!L.length) { main.innerHTML = (alb ? albumBar() : '') + '<div class="empty">' + (tab === 'fav' ? 'ハートを付けた写真がここに集まります' : alb ? 'このアルバムは空です' : 'まだ何もありません<br>下の「アップ」から入れてください') + '</div>'; bindAlbBar(alb); return; }
+  let h = alb ? albumBar() : '', last = '';
   h += '<div class="' + (sel ? 'sel' : '') + '">';
   for (const it of L) {
     const day = fmtDay(it.m.d);
     if (day !== last) { if (last) h += '</div>'; h += '<div class="day">' + day + '</div><div class="grid">'; last = day; }
-    h += '<div class="cell' + (picked.has(it.id) ? ' picked' : '') + '" data-id="' + it.id + '">' + (it.thumb ? '<img loading="lazy" src="' + it.thumb + '">' : '') + (it.m.t === 'v' ? '<span class="dur">▶ ' + fmtDur(it.m.dur || 0) + '</span>' : '') + (it.m.fav ? '<span class="fav">💗</span>' : '') + '<span class="chk">' + (picked.has(it.id) ? '✓' : '') + '</span></div>';
+    h += '<div class="cell' + (picked.has(it.id) ? ' picked' : '') + '" data-id="' + it.id + '"><img alt="">' + (it.m.t === 'v' ? '<span class="dur">▶ ' + fmtDur(it.m.dur || 0) + '</span>' : '') + (it.m.fav ? '<span class="fav">💗</span>' : '') + '<span class="chk">' + (picked.has(it.id) ? '✓' : '') + '</span></div>';
   }
   h += '</div></div>'; main.innerHTML = h;
-  main.querySelectorAll('.cell').forEach(c => c.onclick = () => {
-    const id = c.dataset.id;
-    if (sel) { picked.has(id) ? picked.delete(id) : picked.add(id); c.classList.toggle('picked'); c.querySelector('.chk').textContent = picked.has(id) ? '✓' : ''; }
-    else openViewer(L, id);
+  const byId = new Map(L.map(i => [i.id, i]));
+  main.querySelectorAll('.cell').forEach(c => {
+    const it = byId.get(c.dataset.id), img = c.querySelector('img');
+    if (it._u) img.src = it._u; else { const p = thumbOf(it); if (p) Promise.resolve(p).then(u => { if (u && c.isConnected) img.src = u; }); }
+    c.onclick = () => {
+      const id = c.dataset.id;
+      if (sel) { picked.has(id) ? picked.delete(id) : picked.add(id); c.classList.toggle('picked'); c.querySelector('.chk').textContent = picked.has(id) ? '✓' : ''; }
+      else openViewer(L, id);
+    };
   });
-  if (alb) { $('#albBack').onclick = () => go('alb'); $('#albRen').onclick = () => renameAlbum(alb); $('#albDel').onclick = () => deleteAlbum(alb); }
+  bindAlbBar(alb);
 }
+const albumBar = () => '<div class="albbar"><button class="btn ghost" id="albBack">‹ 戻る</button><button class="btn ghost" id="albRen">名前</button><button class="btn ghost" id="albDel">アルバムを削除</button></div>';
+function bindAlbBar(alb) { if (!alb) return; $('#albBack').onclick = () => go('alb'); $('#albRen').onclick = () => renameAlbum(alb); $('#albDel').onclick = () => deleteAlbum(alb); }
 function renderAlbums() {
   let h = '<div class="albs">';
-  for (const a of albums) { const mem = items.filter(i => i.m.alb === a.id), cv = mem[0]; h += '<div class="alb" data-id="' + a.id + '"><div class="cv">' + (cv && cv.thumb ? '<img src="' + cv.thumb + '">' : '📁') + '</div><div class="nm">' + esc(a.name) + '<small>' + mem.length + 'まい</small></div></div>'; }
-  h += '<div class="alb" id="albNew"><div class="cv">＋</div><div class="nm">あたらしい<small>アルバムを つくる</small></div></div></div>';
+  for (const a of albums) { const mem = items.filter(i => i.m.alb === a.id), cv = mem[0]; h += '<div class="alb" data-id="' + a.id + '"><div class="cv">' + (cv && cv.tb ? '<img alt="" data-cv="' + cv.id + '">' : '📁') + '</div><div class="nm">' + esc(a.name) + '<small>' + mem.length + '枚</small></div></div>'; }
+  h += '<div class="alb" id="albNew"><div class="cv">＋</div><div class="nm">新規作成<small>アルバムを作る</small></div></div></div>';
   $('#main').innerHTML = h;
+  $('#main').querySelectorAll('img[data-cv]').forEach(i => { const it = itemMap.get(i.dataset.cv); Promise.resolve(thumbOf(it)).then(u => { if (u) i.src = u; }); });
   $('#main').querySelectorAll('.alb[data-id]').forEach(e => e.onclick = () => go('alb', e.dataset.id));
-  $('#albNew').onclick = async () => { const n = await ask('アルバムの なまえ', ''); if (n) { await newAlbum(n); render(); } };
+  $('#albNew').onclick = async () => { const n = await ask('アルバムの名前', ''); if (n) { await newAlbum(n); render(); } };
 }
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /* ---------- ダイアログ ---------- */
 function dlg(html) { $('#dbox').innerHTML = html; $('#dlg').classList.remove('hide'); return $('#dbox'); }
 function closeDlg() { $('#dlg').classList.add('hide'); $('#dbox').innerHTML = ''; }
 $('#dlg').onclick = e => { if (e.target.id === 'dlg') { closeDlg(); if (dlg.resolve) dlg.resolve(null); } };
-function ask(title, val) { return new Promise(res => { dlg.resolve = res; const b = dlg('<h3>' + title + '</h3><input id="dIn" value="' + esc(val) + '" maxlength="30"><div class="row"><button class="btn ghost" id="dNo">やめる</button><button class="btn" id="dOk">きめる</button></div>'); const i = b.querySelector('#dIn'); setTimeout(() => i.focus(), 50); b.querySelector('#dNo').onclick = () => { closeDlg(); res(null); }; b.querySelector('#dOk').onclick = () => { closeDlg(); res(i.value.trim() || null); }; }); }
-function confirmDlg(title, okLabel, danger) { return new Promise(res => { dlg.resolve = res; const b = dlg('<h3>' + title + '</h3><div class="row"><button class="btn ghost" id="dNo">やめる</button><button class="btn' + (danger ? ' danger' : '') + '" id="dOk">' + okLabel + '</button></div>'); b.querySelector('#dNo').onclick = () => { closeDlg(); res(false); }; b.querySelector('#dOk').onclick = () => { closeDlg(); res(true); }; }); }
-function pickAlbum() { return new Promise(res => { dlg.resolve = res; let h = '<h3>どの アルバムに いれる？</h3>'; for (const a of albums) h += '<button class="opt" data-id="' + a.id + '">📁 ' + esc(a.name) + '</button>'; h += '<button class="opt" data-id="__new">＋ あたらしい アルバム</button><button class="opt" data-id="__none">アルバムから はずす</button>'; const b = dlg(h); b.querySelectorAll('.opt').forEach(o => o.onclick = async () => { const id = o.dataset.id; closeDlg(); if (id === '__new') { const n = await ask('アルバムの なまえ', ''); res(n ? (await newAlbum(n)).id : null); } else res(id); }); }); }
+function ask(title, val) { return new Promise(res => { dlg.resolve = res; const b = dlg('<h3>' + title + '</h3><input id="dIn" value="' + esc(val) + '" maxlength="30"><div class="row"><button class="btn ghost" id="dNo">やめる</button><button class="btn" id="dOk">決める</button></div>'); const i = b.querySelector('#dIn'); setTimeout(() => i.focus(), 50); b.querySelector('#dNo').onclick = () => { closeDlg(); res(null); }; b.querySelector('#dOk').onclick = () => { closeDlg(); res(i.value.trim() || null); }; }); }
+function confirmDlg(title, okLabel, danger) { return new Promise(res => { dlg.resolve = res; const b = dlg('<h3 style="white-space:pre-line">' + title + '</h3><div class="row"><button class="btn ghost" id="dNo">やめる</button><button class="btn' + (danger ? ' danger' : '') + '" id="dOk">' + okLabel + '</button></div>'); b.querySelector('#dNo').onclick = () => { closeDlg(); res(false); }; b.querySelector('#dOk').onclick = () => { closeDlg(); res(true); }; }); }
+function pickAlbum() { return new Promise(res => { dlg.resolve = res; let h = '<h3>どのアルバムに入れますか?</h3>'; for (const a of albums) h += '<button class="opt" data-id="' + a.id + '">📁 ' + esc(a.name) + '</button>'; h += '<button class="opt" data-id="__new">＋ 新しいアルバム</button><button class="opt" data-id="__none">アルバムから外す</button>'; const b = dlg(h); b.querySelectorAll('.opt').forEach(o => o.onclick = async () => { const id = o.dataset.id; closeDlg(); if (id === '__new') { const n = await ask('アルバムの名前', ''); res(n ? (await newAlbum(n)).id : null); } else res(id); }); }); }
+
+/* ---------- 設定(保存容量・顔認証) ---------- */
+$('#setBtn').onclick = () => {
+  const n = items.length, vids = items.filter(i => i.m.t === 'v').length, size = items.reduce((s, i) => s + (i.m.s || 0), 0);
+  const yen = size / 1073741824 * 3.5;
+  const b = dlg('<h3>保存容量</h3><div class="stat"><div class="big">' + fmtSize(size) + '</div><div>写真 ' + (n - vids) + '枚 / 動画 ' + vids + '本(計 ' + n + '件)</div><div class="mut">料金の目安: 月 約' + (yen < 1 ? '1円未満' : Math.round(yen) + '円') + '(1GBあたり約3.5円で計算)<br>※正確な使用量は Firebase コンソールの Storage で確認できます</div></div><h3 style="margin-top:18px">ロック</h3>' +
+    '<button class="opt" id="fidBtn">' + (fid ? '✓ 顔認証で開く: オン(押すとオフ)' : '顔認証(Face ID)で開けるようにする') + '</button><button class="opt" id="lkBtn">今すぐロックする</button><div class="row"><button class="btn ghost" id="dNo">閉じる</button></div>');
+  b.querySelector('#dNo').onclick = closeDlg; b.querySelector('#lkBtn').onclick = relock;
+  b.querySelector('#fidBtn').onclick = async () => { closeDlg(); if (fid) { await kvDel('face'); fid = null; toast('顔認証をオフにしました'); } else await enrollFace(); };
+};
 
 /* ---------- アルバム ---------- */
 async function newAlbum(name) { const id = hex(crypto.getRandomValues(new Uint8Array(8))), a = { id, name, at: Date.now() }; await setDoc(doc(db, C_ALB, id), { meta: await sealJson({ name, at: a.at }) }); albums.push(a); return a; }
-async function renameAlbum(a) { const n = await ask('あたらしい なまえ', a.name); if (!n) return; a.name = n; await setDoc(doc(db, C_ALB, a.id), { meta: await sealJson({ name: n, at: a.at }) }); render(); }
-async function deleteAlbum(a) { if (!await confirmDlg('「' + a.name + '」を けす？\n(しゃしんは のこるよ)', 'けす', true)) return; for (const it of items.filter(i => i.m.alb === a.id)) { delete it.m.alb; await saveMeta(it); } await deleteDoc(doc(db, C_ALB, a.id)); albums = albums.filter(x => x.id !== a.id); go('alb'); }
+async function renameAlbum(a) { const n = await ask('新しい名前', a.name); if (!n) return; a.name = n; await setDoc(doc(db, C_ALB, a.id), { meta: await sealJson({ name: n, at: a.at }) }); render(); }
+async function deleteAlbum(a) { if (!await confirmDlg('「' + a.name + '」を削除しますか?\n(写真は残ります)', '削除', true)) return; for (const it of items.filter(i => i.m.alb === a.id)) { delete it.m.alb; await saveMeta(it); } await deleteDoc(doc(db, C_ALB, a.id)); albums = albums.filter(x => x.id !== a.id); go('alb'); }
 
 /* ---------- 保存・削除 ---------- */
 async function saveMeta(it) {
-  const x = (await getDoc(doc(db, C_ITEM, it.id))).data();
-  await setDoc(doc(db, C_ITEM, it.id), { ...x, meta: await sealJson(it.m) });
+  const rec = { meta: await sealJson(it.m), thumb: it.tb || '', mod: serverTimestamp() };
+  await setDoc(doc(db, C_ITEM, it.id), rec);
+  await docPut({ id: it.id, meta: rec.meta, thumb: rec.thumb, del: 0, mod: Date.now() });
 }
 async function toggleFav(its) {
   const on = its.some(i => !i.m.fav);
-  for (const i of its) { i.m.fav = on ? 1 : 0; if (!on) delete i.m.fav; await saveMeta(i); }
+  await Promise.all(its.map(i => { if (on) i.m.fav = 1; else delete i.m.fav; return saveMeta(i); }));
   return on;
 }
 async function removeItems(its) {
-  for (const i of its) { await deleteDoc(doc(db, C_ITEM, i.id)); try { await deleteObject(ref(st, ST_DIR + i.id)); } catch (e) { } }
-  const ids = new Set(its.map(i => i.id)); items = items.filter(i => !ids.has(i.id));
+  await Promise.all(its.map(async i => {
+    await setDoc(doc(db, C_ITEM, i.id), { del: 1, mod: serverTimestamp() });   // 目印だけ残す(他の端末にも消えたことが伝わる)
+    await docPut({ id: i.id, del: 1, mod: Date.now() }); try { await deleteObject(ref(st, ST_DIR + i.id)); } catch (e) { }
+    itemMap.delete(i.id); seen.delete(i.id); plain.delete(i.id);
+  }));
+  rebuild();
 }
 async function download(its) {
   for (const it of its) {
     try {
-      toast('ほぞんの じゅんび…');
-      const u8 = await open(new Uint8Array(await getBytes(ref(st, ST_DIR + it.id))));
-      const u = URL.createObjectURL(new Blob([u8], { type: it.m.mt || 'application/octet-stream' })), a = document.createElement('a');
+      toast('保存の準備中…');
+      const u8 = await fetchPlain(it), u = URL.createObjectURL(new Blob([u8], { type: it.m.mt || 'application/octet-stream' })), a = document.createElement('a');
       a.href = u; a.download = it.m.n || it.id; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
-    } catch (e) { toast('ほぞんできなかったよ'); }
+    } catch (e) { toast('保存できませんでした'); }
   }
 }
 const picks = () => items.filter(i => picked.has(i.id));
-$('#sbFav').onclick = async () => { const p = picks(); if (!p.length) return; const on = await toggleFav(p); toast(on ? 'おきにいりに いれたよ' : 'おきにいりから はずしたよ'); selMode = false; picked.clear(); render(); };
-$('#sbAlb').onclick = async () => { const p = picks(); if (!p.length) return; const id = await pickAlbum(); if (id == null) return; for (const i of p) { if (id === '__none') delete i.m.alb; else i.m.alb = id; await saveMeta(i); } toast('うごかしたよ'); selMode = false; picked.clear(); render(); };
+$('#sbFav').onclick = async () => { const p = picks(); if (!p.length) return; const on = await toggleFav(p); toast(on ? 'お気に入りに入れました' : 'お気に入りから外しました'); selMode = false; picked.clear(); render(); };
+$('#sbAlb').onclick = async () => { const p = picks(); if (!p.length) return; const id = await pickAlbum(); if (id == null) return; await Promise.all(p.map(i => { if (id === '__none') delete i.m.alb; else i.m.alb = id; return saveMeta(i); })); toast('移動しました'); selMode = false; picked.clear(); render(); };
 $('#sbDl').onclick = async () => { const p = picks(); if (!p.length) return; await download(p); };
-$('#sbDel').onclick = async () => { const p = picks(); if (!p.length) return; if (!await confirmDlg(p.length + 'まいを けす？\nもとには もどせないよ', 'けす', true)) return; await removeItems(p); toast('けしたよ'); selMode = false; picked.clear(); render(); };
+$('#sbDel').onclick = async () => { const p = picks(); if (!p.length) return; if (!await confirmDlg(p.length + '件を削除しますか?\nもとには戻せません', '削除', true)) return; await removeItems(p); toast('削除しました'); selMode = false; picked.clear(); render(); };
 
-/* ---------- ビューア ---------- */
+/* ---------- ビューア(となりを先読み) ---------- */
+const plain = new Map();   // id -> Promise<Uint8Array>(復号済み。最大6件)
+function fetchPlain(it) {
+  if (plain.has(it.id)) { const p = plain.get(it.id); plain.delete(it.id); plain.set(it.id, p); return p; }
+  const p = getBytes(ref(st, ST_DIR + it.id)).then(b => open(new Uint8Array(b)));
+  p.catch(() => plain.delete(it.id)); plain.set(it.id, p);
+  while (plain.size > 6) plain.delete(plain.keys().next().value);
+  return p;
+}
 let vList = [], vIdx = 0, vToken = 0;
-async function openViewer(L, id) { vList = L; vIdx = L.findIndex(i => i.id === id); $('#viewer').classList.remove('hide'); showV(); }
+function openViewer(L, id) { vList = L; vIdx = L.findIndex(i => i.id === id); $('#viewer').classList.remove('hide'); showV(); }
 async function showV() {
   const it = vList[vIdx]; if (!it) return closeV();
   const tok = ++vToken, vst = $('#vst');
   $('#vTitle').textContent = fmtDay(it.m.d) + '  (' + (vIdx + 1) + '/' + vList.length + ')';
   $('#vFav').textContent = it.m.fav ? '💗' : '♡';
-  vst.innerHTML = '<div class="ld">ひらいています…</div>' + (vIdx > 0 ? '<button class="arr l" id="vPrev">‹</button>' : '') + (vIdx < vList.length - 1 ? '<button class="arr r" id="vNext">›</button>' : '');
+  const th = it._u || '';
+  vst.innerHTML = (th ? '<img class="ph" src="' + th + '">' : '<div class="ld">開いています…</div>') + (vIdx > 0 ? '<button class="arr l" id="vPrev">‹</button>' : '') + (vIdx < vList.length - 1 ? '<button class="arr r" id="vNext">›</button>' : '');
   const pv = $('#vPrev'), nx = $('#vNext'); if (pv) pv.onclick = () => { vIdx--; showV(); }; if (nx) nx.onclick = () => { vIdx++; showV(); };
   try {
-    const u8 = await open(new Uint8Array(await getBytes(ref(st, ST_DIR + it.id)))); if (tok !== vToken) return;
+    const u8 = await fetchPlain(it); if (tok !== vToken) return;
     const u = blobUrl(u8, it.m.mt || (it.m.t === 'v' ? 'video/mp4' : 'image/jpeg')), el = document.createElement(it.m.t === 'v' ? 'video' : 'img');
     el.src = u; if (it.m.t === 'v') { el.controls = true; el.playsInline = true; }
-    vst.querySelector('.ld').replaceWith(el);
-  } catch (e) { if (tok === vToken) vst.querySelector('.ld').textContent = 'ひらけなかったよ'; }
+    const old = vst.querySelector('.ph,.ld'); if (old) old.replaceWith(el); else vst.prepend(el);
+    [vList[vIdx + 1], vList[vIdx - 1]].forEach(n => { if (n && n.m.t !== 'v') fetchPlain(n).catch(() => { }); });
+  } catch (e) { if (tok === vToken) { const l = vst.querySelector('.ld,.ph'); if (l) l.outerHTML = '<div class="ld">開けませんでした</div>'; } }
 }
 function closeV() { vToken++; $('#viewer').classList.add('hide'); $('#vst').innerHTML = ''; render(); }
 $('#vClose').onclick = closeV;
 $('#vFav').onclick = async () => { const it = vList[vIdx]; await toggleFav([it]); $('#vFav').textContent = it.m.fav ? '💗' : '♡'; };
-$('#vAlb').onclick = async () => { const it = vList[vIdx], id = await pickAlbum(); if (id == null) return; if (id === '__none') delete it.m.alb; else it.m.alb = id; await saveMeta(it); toast('うごかしたよ'); };
+$('#vAlb').onclick = async () => { const it = vList[vIdx], id = await pickAlbum(); if (id == null) return; if (id === '__none') delete it.m.alb; else it.m.alb = id; await saveMeta(it); toast('移動しました'); };
 $('#vDl').onclick = () => download([vList[vIdx]]);
-$('#vDel').onclick = async () => { const it = vList[vIdx]; if (!await confirmDlg('この しゃしんを けす？\nもとには もどせないよ', 'けす', true)) return; await removeItems([it]); vList = vList.filter(i => i.id !== it.id); if (vIdx >= vList.length) vIdx = vList.length - 1; vList.length ? showV() : closeV(); };
-$('#vInfo').onclick = () => { const it = vList[vIdx]; dlg('<h3>' + esc(it.m.n || '') + '</h3><div style="color:var(--sub);line-height:1.9;font-size:14px">' + fmtDay(it.m.d) + ' ' + new Date(it.m.d).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + '<br>' + (it.m.w ? it.m.w + '×' + it.m.h + '<br>' : '') + (it.m.s / 1048576).toFixed(1) + ' MB</div><div class="row"><button class="btn ghost" id="dNo">とじる</button></div>').querySelector('#dNo').onclick = closeDlg; };
-let tx = 0; $('#vst').addEventListener('touchstart', e => tx = e.touches[0].clientX, { passive: true });
-$('#vst').addEventListener('touchend', e => { const dx = e.changedTouches[0].clientX - tx; if (Math.abs(dx) > 60) { if (dx < 0 && vIdx < vList.length - 1) { vIdx++; showV(); } else if (dx > 0 && vIdx > 0) { vIdx--; showV(); } } });
+$('#vDel').onclick = async () => { const it = vList[vIdx]; if (!await confirmDlg('この写真を削除しますか?\nもとには戻せません', '削除', true)) return; await removeItems([it]); vList = vList.filter(i => i.id !== it.id); if (vIdx >= vList.length) vIdx = vList.length - 1; vList.length ? showV() : closeV(); };
+$('#vInfo').onclick = () => { const it = vList[vIdx]; dlg('<h3>' + esc(it.m.n || '') + '</h3><div style="color:var(--sub);line-height:1.9;font-size:14px">' + fmtDay(it.m.d) + ' ' + new Date(it.m.d).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + '<br>' + (it.m.w ? it.m.w + '×' + it.m.h + '<br>' : '') + fmtSize(it.m.s || 0) + '</div><div class="row"><button class="btn ghost" id="dNo">閉じる</button></div>').querySelector('#dNo').onclick = closeDlg; };
+let tx0 = 0; $('#vst').addEventListener('touchstart', e => tx0 = e.touches[0].clientX, { passive: true });
+$('#vst').addEventListener('touchend', e => { const dx = e.changedTouches[0].clientX - tx0; if (Math.abs(dx) > 60) { if (dx < 0 && vIdx < vList.length - 1) { vIdx++; showV(); } else if (dx > 0 && vIdx > 0) { vIdx--; showV(); } } });
 document.addEventListener('keydown', e => { if ($('#viewer').classList.contains('hide')) return; if (e.key === 'Escape') closeV(); if (e.key === 'ArrowLeft' && vIdx > 0) { vIdx--; showV(); } if (e.key === 'ArrowRight' && vIdx < vList.length - 1) { vIdx++; showV(); } });
 
-/* ---------- アップロード ---------- */
+/* ---------- アップロード(4枚同時) ---------- */
 let jobs = [], running = false;
 function renderUp() {
-  const main = $('#main');
-  main.innerHTML = '<div class="up"><div class="drop">しゃしんや どうがを えらんでね<br>たくさん いっぺんに えらべるよ<br>おなじ しゃしんは じどうで とばすよ<br><button class="btn" id="pick">えらぶ</button></div><div id="jobs"></div></div>';
+  $('#main').innerHTML = '<div class="up"><div class="drop">写真や動画を選んでください<br>まとめて何枚でも選べます<br>同じ写真は自動で飛ばします<br><button class="btn" id="pick">選ぶ</button></div><div id="jobs"></div></div>';
   $('#pick').onclick = () => $('#file').click(); drawJobs();
 }
 function drawJobs() {
   const j = $('#jobs'); if (!j) return;
-  const lab = { wait: 'まってる', run: 'おくってる', ok: 'できた', dup: 'もう あるよ', err: 'しっぱい' };
-  j.innerHTML = jobs.map(x => '<div class="job"><span class="n">' + esc(x.f.name) + '</span><span class="s ' + x.st + '">' + lab[x.st] + (x.err ? ' (' + esc(x.err) + ')' : '') + '</span></div>' + (x.st === 'run' ? '<div class="bar"><i style="width:' + x.p + '%"></i></div>' : '')).join('');
-  if (jobs.length) { const ok = jobs.filter(x => x.st === 'ok').length, dup = jobs.filter(x => x.st === 'dup').length; j.insertAdjacentHTML('afterbegin', '<div style="padding:4px 0 10px;font-size:13px;color:var(--sub)">' + jobs.length + 'まい中  できた ' + ok + ' / ダブり ' + dup + '</div>'); }
+  const lab = { wait: '待機中', run: '送信中', ok: '完了', dup: '保存済み', err: '失敗' };
+  j.innerHTML = jobs.map(x => '<div class="job"><span class="n">' + esc(x.f.name) + '</span><span class="s ' + x.st + '">' + lab[x.st] + (x.err ? ' (' + esc(x.err) + ')' : '') + '</span></div>' + (x.st === 'run' ? '<div class="bar"><i style="width:' + Math.round(x.p) + '%"></i></div>' : '')).join('');
+  if (jobs.length) { const ok = jobs.filter(x => x.st === 'ok').length, dup = jobs.filter(x => x.st === 'dup').length, left = jobs.filter(x => x.st === 'wait' || x.st === 'run').length; j.insertAdjacentHTML('afterbegin', '<div style="padding:4px 0 10px;font-size:13px;color:var(--sub)">' + jobs.length + '件中  完了 ' + ok + ' / 重複 ' + dup + (left ? ' / 残り ' + left : '') + '</div>'); }
 }
 $('#file').onchange = e => { for (const f of e.target.files) jobs.push({ f, st: 'wait', p: 0 }); e.target.value = ''; if (tab !== 'up') go('up'); else drawJobs(); runJobs(); };
+function putBlob(path, u8, onp) {
+  const r = ref(st, path);
+  if (u8.length < 16 * 1048576) return uploadBytes(r, u8).then(() => onp(1));
+  return new Promise((res, rej) => { const t = uploadBytesResumable(r, u8); t.on('state_changed', s => onp(s.bytesTransferred / s.totalBytes), rej, res); });
+}
 async function runJobs() {
   if (running) return; running = true;
-  const seen = new Set(items.map(i => i.id));
   const worker = async () => {
     for (; ;) {
-      const j = jobs.find(x => x.st === 'wait'); if (!j) return; j.st = 'run'; drawJobs();
+      const j = jobs.find(x => x.st === 'wait'); if (!j) return; j.st = 'run'; j.p = 2; drawJobs();
       try {
         const buf = new Uint8Array(await j.f.arrayBuffer());
-        const id = hex(new Uint8Array(await crypto.subtle.sign('HMAC', HKEY, buf)));
-        if (seen.has(id) || (await getDoc(doc(db, C_ITEM, id))).exists()) { j.st = 'dup'; seen.add(id); drawJobs(); continue; }
-        seen.add(id); j.p = 20; drawJobs();
-        const isV = j.f.type.startsWith('video/'), info = isV ? await videoInfo(j.f) : await imageInfo(j.f, buf);
+        const id = j.id = hex(new Uint8Array(await crypto.subtle.sign('HMAC', HKEY, buf)));
+        if (seen.has(id)) { j.st = 'dup'; drawJobs(); continue; }
+        seen.add(id);
+        const isV = j.f.type.startsWith('video/');
+        const infoP = isV ? videoInfo(j.f) : imageInfo(j.f, buf);                                   // 重複確認と同時に進める
+        const remote = await getDoc(doc(db, C_ITEM, id));
+        if (remote.exists() && !remote.data().del) { j.st = 'dup'; drawJobs(); continue; }
+        const [info, sealed] = await Promise.all([infoP, seal(buf)]); j.p = 15; drawJobs();
         const m = { n: j.f.name, t: isV ? 'v' : 'i', mt: j.f.type, s: j.f.size, w: info.w, h: info.h, d: info.d || j.f.lastModified || Date.now(), dur: info.dur };
         if (!m.w) { delete m.w; delete m.h; } if (!m.dur) delete m.dur;
-        const sealed = await seal(buf); j.p = 40; drawJobs();
-        await uploadBytes(ref(st, ST_DIR + id), sealed); j.p = 90; drawJobs();
-        const th = info.thumb ? await seal(info.thumb) : null;
-        await setDoc(doc(db, C_ITEM, id), { meta: await sealJson(m), thumb: th ? b64(th) : '', up: serverTimestamp() });
-        items.push({ id, m, thumb: info.thumb ? blobUrl(info.thumb, 'image/jpeg') : '' }); items.sort((p, q) => q.m.d - p.m.d);
+        const [th, meta] = await Promise.all([info.thumb ? seal(info.thumb) : null, sealJson(m)]);
+        const tb = th ? b64(th) : '';
+        await putBlob(ST_DIR + id, sealed, f => { j.p = 15 + 80 * f; });
+        j.p = 97; drawJobs();
+        await setDoc(doc(db, C_ITEM, id), { meta, thumb: tb, mod: serverTimestamp() });
+        await docPut({ id, meta, thumb: tb, del: 0, mod: Date.now() });
+        itemMap.set(id, { id, m, tb }); rebuild();
         j.st = 'ok'; j.p = 100; drawJobs();
-      } catch (e) { j.st = 'err'; j.err = e.message || String(e); seen.delete(j.id); drawJobs(); }
+      } catch (e) { j.st = 'err'; j.err = e.message || String(e); if (j.id) seen.delete(j.id); drawJobs(); }
     }
   };
-  await Promise.all([worker(), worker()]);
-  running = false; const ok = jobs.filter(x => x.st === 'ok').length; if (ok) toast(ok + 'まい ほぞんしたよ');
+  const t = setInterval(drawJobs, 400);
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  clearInterval(t); drawJobs(); running = false;
+  const ok = jobs.filter(x => x.st === 'ok').length; if (ok) toast(ok + '件を保存しました');
 }
-/* サムネイル・サイズ・とった日 */
+/* サムネイル・サイズ・撮影日 */
 function drawThumb(src, w, h) {
-  const k = Math.min(1, 360 / Math.max(w, h)), c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
+  const k = Math.min(1, 280 / Math.max(w, h)), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
   c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
-  return new Promise(r => c.toBlob(async b => r(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/jpeg', .72));
+  return new Promise(r => c.toBlob(async b => r(b ? new Uint8Array(await b.arrayBuffer()) : null), 'image/jpeg', .65));
 }
 async function imageInfo(f, buf) {
   const d = exifDate(buf), url = URL.createObjectURL(f);
   try {
-    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('ひらけない')); i.src = url; });
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('画像を開けません')); i.src = url; });
     return { w: img.naturalWidth, h: img.naturalHeight, d, thumb: await drawThumb(img, img.naturalWidth, img.naturalHeight) };
   } catch (e) { return { d, thumb: null }; } finally { URL.revokeObjectURL(url); }
 }
@@ -265,7 +361,7 @@ async function videoInfo(f) {
     return { w: v.videoWidth, h: v.videoHeight, dur, thumb: await drawThumb(v, v.videoWidth, v.videoHeight) };
   } catch (e) { return { thumb: null }; } finally { URL.revokeObjectURL(url); }
 }
-function exifDate(u8) {   // JPEG の「とった日」(なければ null)
+function exifDate(u8) {
   try {
     if (u8[0] !== 0xFF || u8[1] !== 0xD8) return null;
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength); let p = 2;
@@ -283,4 +379,4 @@ function exifDate(u8) {   // JPEG の「とった日」(なければ null)
   } catch (e) { } return null;
 }
 
-lockInit().catch(e => { $('#lockMsg').textContent = 'つながらなかったよ'; });
+lockInit().catch(e => { $('#lockMsg').textContent = '接続できませんでした'; });
