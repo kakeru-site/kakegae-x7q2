@@ -12,7 +12,9 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
-const APP_VER = '8';
+const APP_VER = '9';
+const dbgLog = [];
+function dbg(m) { const d = new Date(); dbgLog.push(String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + ' ' + m); while (dbgLog.length > 8) dbgLog.shift(); const b = document.querySelector('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
 
 /* ---------- 端末のメモ(IndexedDB。中身は暗号化したまま) ---------- */
@@ -308,6 +310,7 @@ const monthLabel = k => Math.floor(k / 100) + '年' + (k % 100) + '月';
 function stage(fs) {   // 選んだ写真から、保存済みを自動で外して、確認画面に並べる
   const known = new Set(items.map(i => i.m.n + '|' + i.m.s)), have = new Set(staged.map(x => x.fp));
   for (const f of fs) { const fp = f.name + '|' + f.size; if (known.has(fp) || have.has(fp)) { stageSkipped++; continue; } have.add(fp); staged.push({ f, fp, ck: true, mo: monthKey(f.lastModified) }); }
+  dbg('確認画面に並べた件数: ' + staged.length + '(保存済みで除外 ' + stageSkipped + ')');
   toast(fs.length + '件を選びました' + (staged.length ? '' : '(すべて保存済みか、読み込めませんでした)'));
   if (tab !== 'up') go('up'); else renderUp();
 }
@@ -320,7 +323,7 @@ function renderUp() {
   const pickBox = '<div class="drop' + (staged.length ? ' small' : '') + '">' + (staged.length ? '' : '写真や動画を選んでください<br>まとめて何枚でも選べます<br>保存済みの写真は自動で外れます<br>') + '<button class="btn" id="pick">' + (staged.length ? '追加で選ぶ' : '選ぶ') + '</button></div>';
   if (!staged.length) {
     main.innerHTML = '<div class="up">' + (stageSkipped ? '<div class="note">保存済みの ' + stageSkipped + '件は外しました</div>' : '') + pickBox + '<div id="jobs"></div></div>';
-    $('#pick').onclick = () => $('#file').click(); drawJobs(); return;
+    $('#pick').onclick = pickFiles; dbgBox(); drawJobs(); return;
   }
   const by = {}; for (const x of staged) (by[x.mo] = by[x.mo] || []).push(x);
   const months = Object.keys(by).map(Number).sort((p, q) => q - p);
@@ -335,15 +338,15 @@ function renderUp() {
   main.innerHTML = h;
   const n = staged.filter(x => x.ck).length;
   main.insertAdjacentHTML('beforeend', '<div id="goBar"><button class="btn" id="goUp"' + (n ? '' : ' disabled') + '>' + n + '件をアップロード</button><button class="btn ghost" id="goNo">やめる</button></div>');
-  $('#pick').onclick = () => $('#file').click();
+  $('#pick').onclick = pickFiles;
   $('#goNo').onclick = () => { staged = []; stageSkipped = 0; $('#goBar') && $('#goBar').remove(); renderUp(); };
-  $('#goUp').onclick = () => { let n = 0; for (const x of staged) if (x.ck) { jobs.push({ f: x.f, st: 'wait', p: 0 }); n++; } staged = []; stageSkipped = 0; renderUp(); toast(n + '件の送信を始めます'); runJobs(); };
+  $('#goUp').onclick = () => { let n = 0; for (const x of staged) if (x.ck) { jobs.push({ f: x.f, st: 'wait', p: 0 }); n++; } staged = []; stageSkipped = 0; renderUp(); toast(n + '件の送信を始めます'); dbg('アップロードを押しました: ' + n + '件'); runJobs(); };
   main.querySelectorAll('[data-mo]').forEach(bt => bt.onclick = () => { const L = by[bt.dataset.mo], all = L.every(x => x.ck); L.forEach(x => x.ck = !all); const y = main.scrollTop; renderUp(); $('#main').scrollTop = y; });
   main.querySelectorAll('.cell').forEach(c => { c.onclick = () => { const x = staged[c.dataset.i]; x.ck = !x.ck; renderUp.keep = main.scrollTop; const y = main.scrollTop; renderUp(); $('#main').scrollTop = y; }; });
   if (thumbIO) thumbIO.disconnect();
   thumbIO = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { thumbIO.unobserve(e.target); const x = staged[e.target.parentNode.dataset.i]; if (x) loadThumb(e.target, x.f); } }), { root: main, rootMargin: '300px' });
   main.querySelectorAll('.cell img').forEach(i => thumbIO.observe(i));
-  drawJobs();
+  dbgBox(); drawJobs();
 }
 let drawT = 0;
 function drawJobs() { if (drawT) return; drawT = setTimeout(() => { drawT = 0; drawJobsNow(); }, 150); }   // 何百件でも重くならないよう、まとめて描く
@@ -359,14 +362,24 @@ function drawJobsNow() {
   j.innerHTML = h;
   const r = $('#retry'); if (r) r.onclick = () => { jobs.forEach(x => { if (x.st === 'err') { x.st = 'wait'; x.err = ''; x.tries = 0; } }); runJobs(); };
 }
-$('#file').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; stage(fs); };
+function pickFiles() { dbg('「選ぶ」を押しました'); $('#file').click(); }
+function dbgBox() { const m = $('#main'); if (m && !$('#dbgbox')) m.insertAdjacentHTML('beforeend', '<div id="dbgbox"></div>'); const b = $('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
+function takeFiles(why) {   // change / input / 画面に戻ったとき のどれでも拾う
+  const inp = $('#file'), fs = [...(inp.files || [])]; if (!fs.length) return;
+  inp.value = ''; dbg('写真を受け取りました(' + why + '): ' + fs.length + '件'); 
+  try { stage(fs); } catch (e) { dbg('エラー: ' + (e.message || e)); toast('エラー: ' + (e.message || e)); }
+}
+$('#file').addEventListener('change', () => takeFiles('change'));
+$('#file').addEventListener('input', () => takeFiles('input'));
+window.addEventListener('focus', () => setTimeout(() => takeFiles('focus'), 400));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(() => takeFiles('visible'), 400); });
 function putBlob(path, u8, onp) {
   const r = ref(st, path);
   if (u8.length < 16 * 1048576) return uploadBytes(r, u8).then(() => onp(1));
   return new Promise((res, rej) => { const t = uploadBytesResumable(r, u8); t.on('state_changed', s => onp(s.bytesTransferred / s.totalBytes), rej, res); });
 }
 async function runJobs() {
-  if (running) return; running = true;
+  dbg('送信開始 running=' + running); if (running) return; running = true;
   let wl = null; try { navigator.wakeLock.request('screen').then(l => { wl = l; if (!running) l.release(); }).catch(() => { }); } catch (e) { }   // アップ中は画面を消さない(返事は待たない)
   const worker = async () => {
     for (; ;) {
@@ -394,7 +407,7 @@ async function runJobs() {
       })(), new Promise((_, rej) => setTimeout(() => rej(new Error('時間切れ(通信が止まりました)')), 120000 + j.f.size / 40000))]); } catch (e) {
         if (j.id) seen.delete(j.id);
         if ((j.tries = (j.tries || 0) + 1) < 3) { j.st = 'wait'; await new Promise(r => setTimeout(r, 1500 * j.tries)); }   // 電波が弱いときは自動で2回までやり直す
-        else { j.st = 'err'; j.err = e.name === 'NotReadableError' ? 'ファイルを読み込めません(iCloudの写真は、先に端末へダウンロードしてください)' : (e.message || String(e)); }
+        else { dbg('失敗: ' + j.f.name + ' ' + (e.message || e)); j.st = 'err'; j.err = e.name === 'NotReadableError' ? 'ファイルを読み込めません(iCloudの写真は、先に端末へダウンロードしてください)' : (e.message || String(e)); }
         drawJobs();
       }
     }
