@@ -96,7 +96,7 @@ async function relock() { revokeAll(); location.reload(); }
 $('#lockGo').onclick = unlock; $('#faceGo').onclick = () => unlockFace(false); $('#pw').onkeydown = $('#pw2').onkeydown = e => { if (e.key === 'Enter') unlock(); };
 $('#lockBtn').onclick = relock;
 let lockT;
-document.addEventListener('visibilitychange', () => { if (document.hidden && KEY) { clearTimeout(lockT); lockT = setTimeout(() => { if (document.hidden) relock(); }, 5 * 60 * 1000); } else clearTimeout(lockT); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && KEY) { clearTimeout(lockT); lockT = setTimeout(() => { if (document.hidden && !running) relock(); }, 5 * 60 * 1000);   // アップ中は自動ロックしない } else clearTimeout(lockT); });
 
 /* ---------- データ(端末のメモ + 新しい分だけ取得) ---------- */
 let items = [], albums = [];
@@ -172,6 +172,7 @@ function render() {
   const byId = new Map(L.map(i => [i.id, i]));
   main.querySelectorAll('.cell').forEach(c => {
     const it = byId.get(c.dataset.id), img = c.querySelector('img');
+    if (!it.tb) { img.remove(); c.insertAdjacentHTML('afterbegin', '<span class="ph0">' + (it.m.t === 'v' ? '🎬' : '🖼') + '</span>'); }
     if (it._u) img.src = it._u; else { const p = thumbOf(it); if (p) Promise.resolve(p).then(u => { if (u && c.isConnected) img.src = u; }); }
     c.onclick = () => {
       const id = c.dataset.id;
@@ -272,10 +273,20 @@ async function showV() {
   try {
     const u8 = await fetchPlain(it); if (tok !== vToken) return;
     const u = blobUrl(u8, it.m.mt || (it.m.t === 'v' ? 'video/mp4' : 'image/jpeg')), el = document.createElement(it.m.t === 'v' ? 'video' : 'img');
-    el.src = u; if (it.m.t === 'v') { el.controls = true; el.playsInline = true; }
+    el.src = u; if (it.m.t === 'v') { el.controls = true; el.playsInline = true; if (!it.tb || !it.m.dur) backfillVideo(it, u); }
     const old = vst.querySelector('.ph,.ld'); if (old) old.replaceWith(el); else vst.prepend(el);
     [vList[vIdx + 1], vList[vIdx - 1]].forEach(n => { if (n && n.m.t !== 'v') fetchPlain(n).catch(() => { }); });
   } catch (e) { if (tok === vToken) { const l = vst.querySelector('.ld,.ph'); if (l) l.outerHTML = '<div class="ld">開けませんでした</div>'; } }
+}
+async function backfillVideo(it, u) {   // サムネイルか長さが空の動画は、開いたときに埋める
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = u;
+  try {
+    const r = await videoFrame(v); let ch = false;
+    if (r.dur && !it.m.dur) { it.m.dur = r.dur; ch = true; }
+    if (r.w && !it.m.w) { it.m.w = r.w; it.m.h = r.h; ch = true; }
+    if (r.thumb && !it.tb) { it.tb = b64(await seal(r.thumb)); it._u = it._p = null; ch = true; }
+    if (ch) await saveMeta(it);
+  } catch (e) { } finally { v.removeAttribute('src'); v.load(); }
 }
 function closeV() { vToken++; $('#viewer').classList.add('hide'); $('#vst').innerHTML = ''; render(); }
 $('#vClose').onclick = closeV;
@@ -381,7 +392,7 @@ async function runJobs() {
       } catch (e) {
         if (j.id) seen.delete(j.id);
         if ((j.tries = (j.tries || 0) + 1) < 3) { j.st = 'wait'; await new Promise(r => setTimeout(r, 1500 * j.tries)); }   // 電波が弱いときは自動で2回までやり直す
-        else { j.st = 'err'; j.err = e.message || String(e); }
+        else { j.st = 'err'; j.err = e.name === 'NotReadableError' ? 'ファイルを読み込めません(iCloudの写真は、先に端末へダウンロードしてください)' : (e.message || String(e)); }
         drawJobs();
       }
     }
@@ -400,18 +411,25 @@ function drawThumb(src, w, h) {
 async function imageInfo(f, buf) {
   const d = exifDate(buf), url = URL.createObjectURL(f);
   try {
-    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('画像を開けません')); i.src = url; });
+    const img = await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), 20000); const i = new Image(); i.onload = () => { clearTimeout(t); res(i); }; i.onerror = () => { clearTimeout(t); rej(new Error('画像を開けません')); }; i.src = url; });
     return { w: img.naturalWidth, h: img.naturalHeight, d, thumb: await drawThumb(img, img.naturalWidth, img.naturalHeight) };
   } catch (e) { return { d, thumb: null }; } finally { URL.revokeObjectURL(url); }
 }
-async function videoInfo(f) {
-  const url = URL.createObjectURL(f), v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'metadata'; v.src = url;
+const waitEv = (el, ev, ms) => new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout ' + ev)), ms); el.addEventListener(ev, () => { clearTimeout(t); res(); }, { once: true }); el.addEventListener('error', () => { clearTimeout(t); rej(new Error('video error')); }, { once: true }); });
+async function videoFrame(v) {   // 動画の1コマ目あたりを取る。取れなくても長さと大きさは返す
+  const out = {};
   try {
-    await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(0); setTimeout(rej, 8000); });
-    const dur = v.duration || 0; v.currentTime = Math.min(1, dur / 3 || 0);
-    await new Promise(r => { v.onseeked = r; setTimeout(r, 2500); });
-    return { w: v.videoWidth, h: v.videoHeight, dur, thumb: await drawThumb(v, v.videoWidth, v.videoHeight) };
-  } catch (e) { return { thumb: null }; } finally { URL.revokeObjectURL(url); }
+    if (!(v.readyState >= 1)) await waitEv(v, 'loadedmetadata', 20000);
+    out.dur = isFinite(v.duration) ? v.duration : 0; out.w = v.videoWidth; out.h = v.videoHeight;
+    const at = Math.min(1, (out.dur || 0) / 3) || 0.01;
+    const sk = waitEv(v, 'seeked', 15000); v.currentTime = at; await sk;
+    out.thumb = await drawThumb(v, v.videoWidth, v.videoHeight);
+  } catch (e) { }
+  return out;
+}
+async function videoInfo(f) {
+  const url = URL.createObjectURL(f), v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+  try { const r = await videoFrame(v); return { w: r.w, h: r.h, dur: r.dur, thumb: r.thumb || null }; } finally { v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url); }
 }
 function exifDate(u8) {
   try {
