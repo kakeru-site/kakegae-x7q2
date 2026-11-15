@@ -4,7 +4,7 @@
    - 速さ: 一覧は端末に(暗号化したまま)覚えておき、2回目からは新しい分だけ取る。アップは4枚同時 */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, query, where, Timestamp, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { ZipWriter } from "./zip.js?v=11";
+import { ZipWriter } from "./zip.js?v=12";
 import { getStorage, ref, uploadBytes, uploadBytesResumable, getBytes, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const app = initializeApp({
@@ -13,7 +13,7 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
-const APP_VER = '11';
+const APP_VER = '12';
 const dbgLog = [];
 function dbg(m) { const d = new Date(); dbgLog.push(String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + ' ' + m); while (dbgLog.length > 8) dbgLog.shift(); const b = document.querySelector('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
@@ -170,7 +170,7 @@ function render() {
   for (const it of L) {
     const day = fmtDay(it.m.d);
     if (day !== last) { if (last) h += '</div>'; h += '<div class="day">' + day + '</div><div class="grid">'; last = day; }
-    h += '<div class="cell' + (picked.has(it.id) ? ' picked' : '') + '" data-id="' + it.id + '"><img alt="">' + (it.m.t === 'v' ? '<span class="dur">▶ ' + fmtDur(it.m.dur || 0) + '</span>' : '') + (it.m.fav ? '<span class="fav">💗</span>' : '') + '<span class="chk">' + (picked.has(it.id) ? '✓' : '') + '</span></div>';
+    h += '<div class="cell' + (picked.has(it.id) ? ' picked' : '') + '" data-id="' + it.id + '"><img alt="">' + (it.m.t === 'v' ? '<span class="dur">▶ ' + fmtDur(it.m.dur || 0) + '</span>' : '') + (it.m.fav ? '<span class="fav">💗</span>' : '') + (it.m.c ? '<span class="cm">💬</span>' : '') + '<span class="chk">' + (picked.has(it.id) ? '✓' : '') + '</span></div>';
   }
   h += '</div></div>'; main.innerHTML = h;
   const byId = new Map(L.map(i => [i.id, i]));
@@ -270,7 +270,7 @@ async function showV() {
   const it = vList[vIdx]; if (!it) return closeV();
   const tok = ++vToken, vst = $('#vst');
   $('#vTitle').textContent = fmtDay(it.m.d) + '  (' + (vIdx + 1) + '/' + vList.length + ')';
-  $('#vFav').textContent = it.m.fav ? '💗' : '♡';
+  $('#vFav').textContent = it.m.fav ? '💗' : '♡'; showCmt(it);
   const th = it._u || '';
   vst.innerHTML = (th ? '<img class="ph" src="' + th + '">' : '<div class="ld">開いています…</div>') + (vIdx > 0 ? '<button class="arr l" id="vPrev">‹</button>' : '') + (vIdx < vList.length - 1 ? '<button class="arr r" id="vNext">›</button>' : '');
   const pv = $('#vPrev'), nx = $('#vNext'); if (pv) pv.onclick = () => { vIdx--; showV(); }; if (nx) nx.onclick = () => { vIdx++; showV(); };
@@ -292,6 +292,16 @@ async function backfillVideo(it, u) {   // サムネイルか長さが空の動�
     if (ch) await saveMeta(it);
   } catch (e) { } finally { v.removeAttribute('src'); v.load(); }
 }
+function showCmt(it) { const e = $('#vcm'); if (!e) return; e.textContent = it.m.c || 'タップしてコメントを書く'; e.classList.toggle('empty', !it.m.c); }
+function editCmt() {
+  const it = vList[vIdx]; if (!it) return;
+  const b = dlg('<h3>コメント</h3><textarea id="cIn" maxlength="1000" placeholder="この写真のメモ"></textarea><div class="row"><button class="btn ghost" id="cNo">やめる</button>' + (it.m.c ? '<button class="btn danger" id="cDel">削除</button>' : '') + '<button class="btn" id="cOk">保存</button></div>');
+  const t = b.querySelector('#cIn'); t.value = it.m.c || ''; setTimeout(() => t.focus(), 50);
+  const save = async v => { v = v.trim(); closeDlg(); if (v) it.m.c = v; else delete it.m.c; showCmt(it); try { await saveMeta(it); toast(v ? 'コメントを保存しました' : 'コメントを削除しました'); } catch (e) { toast('保存できませんでした'); } };
+  b.querySelector('#cNo').onclick = closeDlg; b.querySelector('#cOk').onclick = () => save(t.value);
+  const d = b.querySelector('#cDel'); if (d) d.onclick = () => save('');
+}
+$('#vCmt').onclick = editCmt; $('#vcm').onclick = editCmt;
 function closeV() { vToken++; $('#viewer').classList.add('hide'); $('#vst').innerHTML = ''; render(); }
 $('#vClose').onclick = closeV;
 $('#vFav').onclick = async () => { const it = vList[vIdx]; await toggleFav([it]); $('#vFav').textContent = it.m.fav ? '💗' : '♡'; };
@@ -491,7 +501,7 @@ async function backupZip() {
   const box = dlg('<h3>ZIP を作っています</h3><div class="stat"><div class="big" id="zN">0 / ' + list.length + '</div><div class="bar big" style="margin:10px 0"><i id="zBar"></i></div><div class="mut" id="zInfo">この画面を開いたままにしてください</div></div><div class="row"><button class="btn ghost" id="zCancel">やめる</button></div>');
   box.querySelector('#zCancel').onclick = () => { cancel = true; };
   const info = t => { const e = $('#zInfo'); if (e) e.textContent = t; };
-  const failed = [], used = new Set(), rows = ['保存名,元のファイル名,撮影日時,アルバム,お気に入り'], csv = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const failed = [], used = new Set(), rows = ['保存名,元のファイル名,撮影日時,アルバム,お気に入り,コメント'], csv = v => '"' + String(v).replace(/"/g, '""') + '"';
   const albName = id => (albums.find(a => a.id === id) || {}).name || '';
   try {
     const zip = new ZipWriter(sink, {});
@@ -514,7 +524,7 @@ async function backupZip() {
         let nm = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '/' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '_' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()) + '_' + base;
         for (let k = 2; used.has(nm); k++) nm = nm.replace(/(\.[^./]*)?$/, '_' + k + '$1');
         used.add(nm); await zip.add(nm, u8, it.m.d || Date.now()); bytes += u8.length;
-        rows.push([csv(nm), csv(it.m.n || ''), csv(d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes())), csv(albName(it.m.alb)), it.m.fav ? '1' : ''].join(','));
+        rows.push([csv(nm), csv(it.m.n || ''), csv(d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes())), csv(albName(it.m.alb)), it.m.fav ? '1' : '', csv(it.m.c || '')].join(','));
       } catch (e) { failed.push((it.m.n || it.id) + '  ' + (e.message || e)); }
       done++; const n = $('#zN'); if (n) n.textContent = done + ' / ' + list.length; const bar = $('#zBar'); if (bar) bar.style.width = Math.round(done / list.length * 100) + '%'; info(fmtSize(bytes) + ' / 約 ' + fmtSize(total) + '  この画面を開いたままにしてください');
     }

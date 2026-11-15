@@ -47,6 +47,7 @@ nav button.on{color:var(--acc)}
 .drop.small{padding:10px;border-width:1px}.drop.small .btn{margin:0}.note{padding:10px 2px;font-size:13px;color:var(--sub)}.mh{display:flex;align-items:center;justify-content:space-between;padding:14px 2px 6px;position:sticky;top:0;background:var(--bg);z-index:2;font-size:14px}.mh small{color:var(--sub)}.rv .cell .chk{display:flex}.rv .cell.on .chk{background:var(--acc);border-color:var(--acc);color:#1a0d33}.rv .cell:not(.on) img{opacity:.3}.ph0{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:28px}#goBar{position:fixed;left:0;right:0;bottom:calc(58px + env(safe-area-inset-bottom));z-index:15;display:flex;gap:8px;padding:10px 12px;background:var(--bg2);border-top:1px solid var(--line)}#goBar .btn{flex:1;padding:12px 6px}#goBar .btn:first-child{flex:2}#goBar .btn[disabled]{opacity:.4}
 .jerr{font-size:11px;color:var(--danger);padding:0 0 6px;word-break:break-all}.bar.big{height:8px;border-radius:4px}.sumt{font-size:13px;color:var(--sub);padding:6px 0}
 #dbgbox{margin:14px 0 4px;padding:8px 10px;border-radius:10px;background:#0006;font-size:11px;line-height:1.6;color:var(--sub);word-break:break-all;white-space:pre-line}
+#vcm{color:#fff;font-size:14px;line-height:1.6;padding:8px 16px;max-height:22vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#000;cursor:pointer}#vcm.empty{color:#888;font-size:13px}.cell .cm{position:absolute;left:5px;top:5px;font-size:13px;text-shadow:0 1px 3px #000}.rv .cell .cm{display:none}#dlg textarea{width:100%;min-height:130px;padding:12px;border-radius:12px;border:1px solid var(--line);background:#0006;color:var(--ink);font:inherit;font-size:16px;line-height:1.6;resize:vertical}
 .cell img{width:100%;height:100%;object-fit:cover;display:block}
 .cell .fav{position:absolute;right:5px;bottom:3px;font-size:14px;text-shadow:0 1px 3px #000}
 .cell .dur{position:absolute;left:5px;bottom:4px;font-size:11px;background:#000a;padding:1px 6px;border-radius:8px}
@@ -102,7 +103,7 @@ nav button.on{color:var(--acc)}
   <input id="pw" type="password" autocomplete="off" placeholder="合言葉">
   <input id="pw2" class="hide" type="password" autocomplete="off" placeholder="もう一度">
   <div id="lockMsg"></div>
-  <div id="ver" style="position:absolute;bottom:12px;font-size:11px;color:#a99bd088">v11</div>
+  <div id="ver" style="position:absolute;bottom:12px;font-size:11px;color:#a99bd088">v12</div>
   <button class="btn" id="lockGo">開く</button><button class="btn ghost hide" id="faceGo">顔認証で開く</button>
 </div>
 
@@ -122,11 +123,12 @@ nav button.on{color:var(--acc)}
 <div id="viewer" class="hide">
   <div class="top"><button id="vClose">✕</button><div class="t" id="vTitle"></div><button id="vInfo">⋯</button></div>
   <div id="vst"></div>
-  <div class="bot"><button id="vFav">♡</button><button id="vAlb">📁</button><button id="vDl">⬇︎</button><button id="vDel">🗑</button></div>
+  <div id="vcm"></div>
+  <div class="bot"><button id="vFav">♡</button><button id="vCmt">💬</button><button id="vAlb">📁</button><button id="vDl">⬇︎</button><button id="vDel">🗑</button></div>
 </div>
 <div id="dlg" class="hide"><div class="box" id="dbox"></div></div>
 <div id="toast"></div>
 <input type="file" id="file" accept="image/*,video/*" multiple style="position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0">
 
-<script type="module" src="app.js?v=11"></script>
+<script type="module" src="app.js?v=12"></script>
 </body></html>
