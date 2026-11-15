@@ -12,6 +12,7 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
+const APP_VER = '8';
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
 
 /* ---------- 端末のメモ(IndexedDB。中身は暗号化したまま) ---------- */
@@ -206,7 +207,7 @@ function pickAlbum() { return new Promise(res => { dlg.resolve = res; let h = '<
 $('#setBtn').onclick = () => {
   const n = items.length, vids = items.filter(i => i.m.t === 'v').length, size = items.reduce((s, i) => s + (i.m.s || 0), 0);
   const yen = size / 1073741824 * 3.5;
-  const b = dlg('<h3>保存容量</h3><div class="stat"><div class="big">' + fmtSize(size) + '</div><div>写真 ' + (n - vids) + '枚 / 動画 ' + vids + '本(計 ' + n + '件)</div><div class="mut">料金の目安: 月 約' + (yen < 1 ? '1円未満' : Math.round(yen) + '円') + '(1GBあたり約3.5円で計算)<br>※正確な使用量は Firebase コンソールの Storage で確認できます</div></div><h3 style="margin-top:18px">ロック</h3>' +
+  const b = dlg('<h3>保存容量 <small style="color:var(--sub);font-weight:400">(版 v' + APP_VER + ')</small></h3><div class="stat"><div class="big">' + fmtSize(size) + '</div><div>写真 ' + (n - vids) + '枚 / 動画 ' + vids + '本(計 ' + n + '件)</div><div class="mut">料金の目安: 月 約' + (yen < 1 ? '1円未満' : Math.round(yen) + '円') + '(1GBあたり約3.5円で計算)<br>※正確な使用量は Firebase コンソールの Storage で確認できます</div></div><h3 style="margin-top:18px">ロック</h3>' +
     '<button class="opt" id="fidBtn">' + (fid ? '✓ 顔認証で開く: オン(押すとオフ)' : '顔認証(Face ID)で開けるようにする') + '</button><button class="opt" id="lkBtn">今すぐロックする</button><div class="row"><button class="btn ghost" id="dNo">閉じる</button></div>');
   b.querySelector('#dNo').onclick = closeDlg; b.querySelector('#lkBtn').onclick = relock;
   b.querySelector('#fidBtn').onclick = async () => { closeDlg(); if (fid) { await kvDel('face'); fid = null; toast('顔認証をオフにしました'); } else await enrollFace(); };
@@ -307,6 +308,7 @@ const monthLabel = k => Math.floor(k / 100) + '年' + (k % 100) + '月';
 function stage(fs) {   // 選んだ写真から、保存済みを自動で外して、確認画面に並べる
   const known = new Set(items.map(i => i.m.n + '|' + i.m.s)), have = new Set(staged.map(x => x.fp));
   for (const f of fs) { const fp = f.name + '|' + f.size; if (known.has(fp) || have.has(fp)) { stageSkipped++; continue; } have.add(fp); staged.push({ f, fp, ck: true, mo: monthKey(f.lastModified) }); }
+  toast(fs.length + '件を選びました' + (staged.length ? '' : '(すべて保存済みか、読み込めませんでした)'));
   if (tab !== 'up') go('up'); else renderUp();
 }
 function loadThumb(img, f) {
