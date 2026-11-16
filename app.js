@@ -13,7 +13,7 @@ const app = initializeApp({
 });
 const db = getFirestore(app), st = getStorage(app);
 const C_META = 'kakegae_meta', C_ITEM = 'kakegae_items', C_ALB = 'kakegae_albums', ST_DIR = 'kakegae/';
-const APP_VER = '13';
+const APP_VER = '14';
 const dbgLog = [];
 function dbg(m) { const d = new Date(); dbgLog.push(String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + ' ' + m); while (dbgLog.length > 8) dbgLog.shift(); const b = document.querySelector('#dbgbox'); if (b) b.textContent = dbgLog.join('\n'); }
 const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new TextDecoder();
@@ -22,7 +22,11 @@ const $ = s => document.querySelector(s), enc = new TextEncoder(), dec = new Tex
 let _idb = null;
 function idb() {
   return _idb || (_idb = new Promise((res, rej) => {
-    try { const q = indexedDB.open('kakegae', 1); q.onupgradeneeded = () => { q.result.createObjectStore('docs', { keyPath: 'id' }); q.result.createObjectStore('kv'); }; q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); } catch (e) { rej(e); }
+    try {
+      const q = indexedDB.open('kakegae', 2);
+      q.onupgradeneeded = () => { const d = q.result; if (!d.objectStoreNames.contains('docs')) d.createObjectStore('docs', { keyPath: 'id' }); if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv'); if (!d.objectStoreNames.contains('blobs')) d.createObjectStore('blobs', { keyPath: 'id' }); };
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    } catch (e) { rej(e); }
   }).catch(() => null));
 }
 async function tx(store, mode, fn) {
@@ -31,6 +35,29 @@ async function tx(store, mode, fn) {
 }
 const kvGet = k => tx('kv', 'readonly', s => s.get(k)), kvSet = (k, v) => tx('kv', 'readwrite', s => s.put(v, k)), kvDel = k => tx('kv', 'readwrite', s => s.delete(k));
 const docAll = () => tx('docs', 'readonly', s => s.getAll()), docPut = r => tx('docs', 'readwrite', s => s.put(r)), docClear = () => tx('docs', 'readwrite', s => s.clear());
+
+/* ---------- 見た写真の端末キャッシュ(暗号化したまま。通信をへらす) ---------- */
+const CACHE_CAP = 500 * 1048576;   // 端末にためる上限(500MB)。古いものから自動で消す
+let cacheIdx = null;               // Map id -> {size, at}
+const blobGet = id => tx('blobs', 'readonly', s => s.get(id));
+const blobPutRaw = r => tx('blobs', 'readwrite', s => s.put(r));
+const blobDelRaw = id => tx('blobs', 'readwrite', s => s.delete(id));
+const blobClearRaw = () => tx('blobs', 'readwrite', s => s.clear());
+async function cacheLoad() { if (cacheIdx) return cacheIdx; const arr = (await kvGet('blobIndex')) || []; cacheIdx = new Map(arr.map(x => [x.id, { size: x.size, at: x.at }])); return cacheIdx; }
+async function cachePersist() { if (!cacheIdx) return; await kvSet('blobIndex', [...cacheIdx.entries()].map(([id, v]) => ({ id, size: v.size, at: v.at }))); }
+async function cacheGet(id) { try { const r = await blobGet(id); return r ? r.data : null; } catch (e) { return null; } }
+async function cachePut(id, data) {
+  try {
+    await cacheLoad(); if (cacheIdx.has(id)) return;
+    await blobPutRaw({ id, data }); cacheIdx.set(id, { size: data.length, at: Date.now() });
+    let total = 0; cacheIdx.forEach(v => total += v.size);
+    if (total > CACHE_CAP) { const old = [...cacheIdx.entries()].sort((a, b) => a[1].at - b[1].at); for (const [eid, v] of old) { if (total <= CACHE_CAP) break; if (eid === id) continue; await blobDelRaw(eid); cacheIdx.delete(eid); total -= v.size; } }
+    await cachePersist();
+  } catch (e) { }
+}
+async function cacheDel(id) { try { await cacheLoad(); if (cacheIdx.has(id)) { cacheIdx.delete(id); await cachePersist(); } await blobDelRaw(id); } catch (e) { } }
+async function cacheClear() { try { cacheIdx = new Map(); await kvDel('blobIndex'); await blobClearRaw(); } catch (e) { } }
+async function cacheBytes() { try { await cacheLoad(); let t = 0; cacheIdx.forEach(v => t += v.size); return t; } catch (e) { return 0; } }
 
 /* ---------- 暗号 ---------- */
 const b64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
@@ -116,7 +143,7 @@ async function ingest(rec) {
 const rebuild = () => { items = [...itemMap.values()].sort((p, q) => q.m.d - p.m.d); };
 async function loadAll() {
   const sv = await kvGet('salt');
-  if (sv !== b64(salt)) { await docClear(); await kvDel('last'); await kvSet('salt', b64(salt)); }
+  if (sv !== b64(salt)) { await docClear(); await cacheClear(); await kvDel('last'); await kvSet('salt', b64(salt)); }   // 合言葉が変わったらキャッシュも作り直す
   const cached = (await docAll()) || [];
   await Promise.all(cached.map(ingest)); rebuild();
   const fresh = cached.length === 0;
@@ -233,10 +260,14 @@ function pickAlbum() { return new Promise(res => { dlg.resolve = res; let h = '<
 $('#setBtn').onclick = () => {
   const n = items.length, vids = items.filter(i => i.m.t === 'v').length, size = items.reduce((s, i) => s + (i.m.s || 0), 0);
   const yen = size / 1073741824 * 3.5;
-  const b = dlg('<h3>保存容量 <small style="color:var(--sub);font-weight:400">(版 v' + APP_VER + ')</small></h3><div class="stat"><div class="big">' + fmtSize(size) + '</div><div>写真 ' + (n - vids) + '枚 / 動画 ' + vids + '本(計 ' + n + '件)</div><div class="mut">料金の目安: 月 約' + (yen < 1 ? '1円未満' : Math.round(yen) + '円') + '(1GBあたり約3.5円で計算)<br>※正確な使用量は Firebase コンソールの Storage で確認できます</div></div><h3 style="margin-top:18px">ロック</h3>' +
+  const b = dlg('<h3>保存容量 <small style="color:var(--sub);font-weight:400">(版 v' + APP_VER + ')</small></h3><div class="stat"><div class="big">' + fmtSize(size) + '</div><div>写真 ' + (n - vids) + '枚 / 動画 ' + vids + '本(計 ' + n + '件)</div><div class="mut">料金の目安: 月 約' + (yen < 1 ? '1円未満' : Math.round(yen) + '円') + '(1GBあたり約3.5円で計算)<br>※正確な使用量は Firebase コンソールの Storage で確認できます</div></div>' +
+    '<h3 style="margin-top:18px">端末のキャッシュ</h3><div class="mut" id="cacheLine" style="line-height:1.8">計算中…</div><button class="opt" id="ccBtn">キャッシュを消す(次に見るとき、また読み込みます)</button>' +
+    '<h3 style="margin-top:18px">ロック</h3>' +
     '<button class="opt" id="fidBtn">' + (fid ? '✓ 顔認証で開く: オン(押すとオフ)' : '顔認証(Face ID)で開けるようにする') + '</button><button class="opt" id="zipBtn">💾 全部まとめて ZIP で保存(パソコン用)</button><button class="opt" id="lkBtn">今すぐロックする</button><div class="row"><button class="btn ghost" id="dNo">閉じる</button></div>');
   b.querySelector('#dNo').onclick = closeDlg; b.querySelector('#lkBtn').onclick = relock; b.querySelector('#zipBtn').onclick = () => { closeDlg(); backupZip(); };
   b.querySelector('#fidBtn').onclick = async () => { closeDlg(); if (fid) { await kvDel('face'); fid = null; toast('顔認証をオフにしました'); } else await enrollFace(); };
+  cacheBytes().then(cb => { const e = $('#cacheLine'); if (e) e.innerHTML = '一度見た写真を端末にためて、次からは通信せずに表示します（上限 ' + fmtSize(CACHE_CAP) + '）。<br>いま ' + fmtSize(cb) + ' 使用中'; });
+  b.querySelector('#ccBtn').onclick = async () => { await cacheClear(); plain.clear(); const e = $('#cacheLine'); if (e) e.innerHTML = 'キャッシュを消しました（0 MB）'; toast('キャッシュを消しました'); };
 };
 
 /* ---------- アルバム ---------- */
@@ -259,7 +290,7 @@ async function removeItems(its) {
   await Promise.all(its.map(async i => {
     await setDoc(doc(db, C_ITEM, i.id), { del: 1, mod: serverTimestamp() });   // 目印だけ残す(他の端末にも消えたことが伝わる)
     await docPut({ id: i.id, del: 1, mod: Date.now() }); try { await deleteObject(ref(st, ST_DIR + i.id)); } catch (e) { }
-    itemMap.delete(i.id); seen.delete(i.id); plain.delete(i.id);
+    itemMap.delete(i.id); seen.delete(i.id); plain.delete(i.id); cacheDel(i.id);
   }));
   rebuild();
 }
@@ -282,7 +313,13 @@ $('#sbDel').onclick = async () => { const p = picks(); if (!p.length) return; if
 const plain = new Map();   // id -> Promise<Uint8Array>(復号済み。最大6件)
 function fetchPlain(it) {
   if (plain.has(it.id)) { const p = plain.get(it.id); plain.delete(it.id); plain.set(it.id, p); return p; }
-  const p = getBytes(ref(st, ST_DIR + it.id)).then(b => open(new Uint8Array(b)));
+  const p = (async () => {
+    const c = await cacheGet(it.id);                       // まず端末のキャッシュを見る(通信ゼロ)
+    if (c) return open(c);
+    const b = new Uint8Array(await getBytes(ref(st, ST_DIR + it.id)));   // 無ければ1回だけダウンロード
+    cachePut(it.id, b);                                    // 次回のために、暗号化したまま端末へ保存
+    return open(b);
+  })();
   p.catch(() => plain.delete(it.id)); plain.set(it.id, p);
   while (plain.size > 6) plain.delete(plain.keys().next().value);
   return p;
@@ -302,7 +339,7 @@ async function showV() {
     const u = blobUrl(u8, it.m.mt || (it.m.t === 'v' ? 'video/mp4' : 'image/jpeg')), el = document.createElement(it.m.t === 'v' ? 'video' : 'img');
     el.src = u; if (it.m.t === 'v') { el.controls = true; el.playsInline = true; if (!it.tb || !it.m.dur) backfillVideo(it, u); }
     const old = vst.querySelector('.ph,.ld'); if (old) old.replaceWith(el); else vst.prepend(el);
-    [vList[vIdx + 1], vList[vIdx - 1]].forEach(n => { if (n && n.m.t !== 'v') fetchPlain(n).catch(() => { }); });
+    const nx2 = vList[vIdx + 1]; if (nx2 && nx2.m.t !== 'v') fetchPlain(nx2).catch(() => { });   // 先読みは「次の1枚」だけ(通信をへらす)
   } catch (e) { if (tok === vToken) { const l = vst.querySelector('.ld,.ph'); if (l) l.outerHTML = '<div class="ld">開けませんでした</div>'; } }
 }
 async function backfillVideo(it, u) {   // サムネイルか長さが空の動画は、開いたときに埋める
@@ -529,8 +566,9 @@ async function backupZip() {
   try {
     const zip = new ZipWriter(sink, {});
     const fetchOne = async it => {   // 大きいファイルは時間がかかる。止まったら(目安: 1MBあたり数秒+60秒)最大3回やり直す
+      const c = await cacheGet(it.id); if (c) return open(c);   // 端末にあれば、ダウンロードしない
       for (let k = 1; ; k++) {
-        try { const lim = 60000 + (it.m.s || 0) / 100000 * 1000; const b = await Promise.race([getBytes(ref(st, ST_DIR + it.id)), new Promise((_, rej) => setTimeout(() => rej(new Error('時間切れ')), lim))]); return await open(new Uint8Array(b)); }
+        try { const lim = 60000 + (it.m.s || 0) / 100000 * 1000; const b = new Uint8Array(await Promise.race([getBytes(ref(st, ST_DIR + it.id)), new Promise((_, rej) => setTimeout(() => rej(new Error('時間切れ')), lim))])); cachePut(it.id, b); return await open(b); }
         catch (e) { if (k >= 3 || cancel) throw e; }
       }
     };
